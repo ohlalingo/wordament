@@ -1,0 +1,14 @@
+{
+  "type": "crossword",
+  "gridSize": 12,
+  "words": [
+    {
+      "number": 1,
+      "word": "PHISHING",
+      "row": 0,
+      "col": 0,
+      "direction": "across",
+      "clue": "Fraud emails that trick users into revealing sensitive information."
+    }
+  ]
+}

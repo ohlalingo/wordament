@@ -1,0 +1,17 @@
+{
+  "id": "${TODAY}-ja-crossword",
+  "date": "${TODAY}",
+  "language": "ja",
+  "type": "crossword",
+  "gridSize": 12,
+  "words": [
+    {
+      "number": 1,
+      "word": "フィッシング",
+      "row": 0,
+      "col": 0,
+      "direction": "across",
+      "clueJa": "個人情報を盗むことを目的とした詐欺メール攻撃。"
+    }
+  ]
+}

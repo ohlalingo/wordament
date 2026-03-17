@@ -1,0 +1,10 @@
+{
+  "type": "unjumble",
+  "questions": [
+    {"scrambled": "SOMANWERAR", "answer": "RANSOMWARE", "clue": "Encrypts files for payment"},
+    {"scrambled": "NIHPISGH", "answer": "PHISHING", "clue": "Fraudulent email attack"},
+    {"scrambled": "LFRWLAIE", "answer": "FIREWALL", "clue": "Network security barrier"},
+    {"scrambled": "RLWAEMA", "answer": "MALWARE", "clue": "Malicious software"},
+    {"scrambled": "TTNOBE", "answer": "BOTNET", "clue": "Network of compromised computers"}
+  ]
+}
