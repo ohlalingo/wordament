@@ -59,10 +59,14 @@ router.get("/regional-champions", async (_req, res) => {
 
     // Today
     const today = todayLocalISO();
-    const todayRows = await fetchBucket(`AND p.puzzle_date = $1::date`, [today]);
+    // Use both puzzle_date and attempt created_at to avoid stale seeded data skewing "today"
+    const todayRows = await fetchBucket(`AND p.puzzle_date = $1::date AND pa.created_at::date = $1::date`, [today]);
 
     // This week (last 7 days including today)
-    const weekRows = await fetchBucket(`AND p.puzzle_date >= ($1::date - INTERVAL '6 days')`, [today]);
+    const weekRows = await fetchBucket(
+      `AND p.puzzle_date >= ($1::date - INTERVAL '6 days') AND pa.created_at::date >= ($1::date - INTERVAL '6 days')`,
+      [today]
+    );
 
     // All time
     const allRows = await fetchBucket("", []);

@@ -54,11 +54,14 @@ export class PuzzleContent extends BaseEntity {
 @Column({ type: "int", name: "puzzle_type_id" })
   puzzleTypeId!: number;
 
-  @Column({ type: "varchar", name: "language", default: "en" })
+@Column({ type: "varchar", name: "language", default: "en" })
   language!: string;
 
   @Column({ type: "varchar", name: "external_id", nullable: true })
   externalId?: string | null;
+
+  @Column({ type: "int", name: "slot", default: 1 })
+  slot!: number;
 
   @Column({ type: "jsonb" })
   content!: Record<string, unknown>;

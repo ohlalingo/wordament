@@ -134,6 +134,10 @@ export async function buildAdminRouter(dbUrlConfig: {
   const admin = new AdminJS({
     rootPath: "/admin",
     componentLoader,
+    version: {
+      admin: true,
+      app: `cw-prod-${Date.now()}`,
+    },
     // non-standard prop to pass DS into action handler context
     dataSource,
     branding: {
@@ -192,27 +196,51 @@ export async function buildAdminRouter(dbUrlConfig: {
         resource: PuzzleContent,
         options: {
           parent: { name: "Puzzles" },
-          listProperties: ["puzzleId", "externalId", "puzzle_date", "type_name", "slot", "language"],
+          listProperties: [
+            "id",
+            "external_id",
+            "puzzle_id",
+            "puzzle.puzzle_date",
+            "type_name",
+            "slot",
+            "language",
+          ],
           filterProperties: ["language"],
           sort: { sortBy: "id", direction: "desc" },
           properties: {
-            id: { isVisible: false },
-            puzzleId: {
-              label: "Puzzle ID",
+            id: {
+              isVisible: { list: true, filter: false, show: true, edit: false },
+              label: "Puzzle Content ID",
+            },
+            external_id: {
+              label: "External ID",
+              isVisible: { list: true, filter: false, show: true, edit: true },
+            },
+            externalId: { isVisible: false },
+            puzzle_id: {
+              label: "PuzzleDayID",
               isVisible: { list: true, filter: true, show: true, edit: false },
             },
+            puzzleId: { isVisible: false },
+            "puzzle.puzzle_date": {
+              label: "Puzzle Date",
+              isVisible: { list: true, filter: false, show: true, edit: false },
+            },
+            puzzle_type_id: {
+              label: "Puzzle Type ID",
+              isVisible: { list: false, filter: true, show: true, edit: false },
+            },
             puzzleTypeId: { isVisible: { list: false, filter: false, show: false, edit: false } },
+            type_name: {
+              label: "Puzzle Type",
+              isVisible: { list: true, filter: false, show: true, edit: false },
+            },
             slot: {
               label: "Slot",
               type: "number",
               isVisible: { list: true, filter: true, show: true, edit: true },
               defaultValue: 1,
             },
-            externalId: {
-              label: "External ID",
-              isVisible: { list: true, filter: false, show: true, edit: true },
-            },
-            external_id: { isVisible: false },
             language: {
               label: "Language",
               isVisible: { list: true, filter: true, show: true, edit: true },
@@ -230,16 +258,8 @@ export async function buildAdminRouter(dbUrlConfig: {
                   "Paste JSON for this puzzle type (crossword/wordsearch/unjumble). It will be saved directly to content.",
               },
             },
-            puzzle_date: {
-              label: "Puzzle Date",
-              type: "string",
-              isVisible: { list: true, filter: false, show: true, edit: false },
-            },
-            type_name: {
-              label: "Puzzle Type",
-              type: "string",
-              isVisible: { list: true, filter: false, show: true, edit: false },
-            },
+            puzzle_date: { isVisible: false },
+            type_name: { isVisible: false },
           },
           actions: {
             list: {
@@ -248,6 +268,11 @@ export async function buildAdminRouter(dbUrlConfig: {
 
                 for (const record of response.records) {
                   const params = { ...record.params }
+
+                  // normalize snake/camel so listProperties resolve
+                  if (params.externalId && !params.external_id) params.external_id = params.externalId
+                  if (params.puzzleId && !params.puzzle_id) params.puzzle_id = params.puzzleId
+                  if (params.puzzleTypeId && !params.puzzle_type_id) params.puzzle_type_id = params.puzzleTypeId
 
                   if (params.puzzleId) {
                     const puzzle = await dataSource.getRepository(Puzzle).findOneBy({ id: params.puzzleId })
@@ -259,6 +284,9 @@ export async function buildAdminRouter(dbUrlConfig: {
                           : d?.toISOString
                           ? d.toISOString().slice(0, 10)
                           : d
+                      params["puzzle.puzzle_date"] = params.puzzle_date
+                      params.puzzleDate = params.puzzle_date
+                      params.puzzle_id = params.puzzleId
                     }
                   }
 
@@ -266,11 +294,17 @@ export async function buildAdminRouter(dbUrlConfig: {
                     const type = await dataSource.getRepository(PuzzleType).findOneBy({ id: params.puzzleTypeId })
                     if (type) {
                       params.type_name = (type as any).type_name ?? type.typeName
+                      params.puzzle_type_id = params.puzzleTypeId
                     }
                   }
 
                   if (params.external_id && !params.externalId) {
                     params.externalId = params.external_id
+                  }
+
+                  // ensure slot is present for list/edit hydration
+                  if (params.slot === undefined && (record as any).params?.slot !== undefined) {
+                    params.slot = (record as any).params.slot
                   }
 
                   record.params = params
