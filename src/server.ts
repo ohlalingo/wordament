@@ -37,6 +37,15 @@ app.use(express.json());
 // Respect X-Forwarded-* headers when behind a proxy/load balancer
 app.set("trust proxy", 1);
 
+// Block text/plain requests from hitting AdminJS/formidable to avoid log spam
+app.use("/admin", (req, res, next) => {
+  const ct = req.headers["content-type"] || "";
+  if (ct.startsWith("text/plain")) {
+    return res.status(415).json({ error: "Unsupported content-type" });
+  }
+  next();
+});
+
 app.get("/", (_req, res) => {
   res.json({ message: "CyberWordament backend is running" });
 });
