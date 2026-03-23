@@ -36,11 +36,7 @@ async function verifyPassword(password: string, stored?: string | null) {
   if (!stored || !stored.startsWith("scrypt$")) return false;
   const [, nStr, rStr, pStr, saltB64, hashB64] = stored.split("$");
   const salt = Buffer.from(saltB64, "base64");
-  const derived = (await scrypt(password, salt, 64, {
-    N: Number(nStr),
-    r: Number(rStr),
-    p: Number(pStr),
-  })) as Buffer;
+  const derived = (await scrypt(password, salt, 64)) as Buffer;
   return derived.toString("base64") === hashB64;
 }
 
