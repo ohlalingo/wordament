@@ -42,5 +42,6 @@ CREATE TABLE IF NOT EXISTS puzzle_attempts (
   correct_words INTEGER,
   score INTEGER,
   time_taken INTEGER,
+  completed BOOLEAN DEFAULT TRUE,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );

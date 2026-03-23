@@ -34,6 +34,8 @@ const attemptLimiter = rateLimit({
 
 app.use(cors());
 app.use(express.json());
+// Respect X-Forwarded-* headers when behind a proxy/load balancer
+app.set("trust proxy", 1);
 
 app.get("/", (_req, res) => {
   res.json({ message: "CyberWordament backend is running" });
@@ -56,6 +58,19 @@ function stripReservedFields(content: any) {
   return content;
 }
 
+// Normalize incoming date values to YYYY-MM-DD (server-local) to avoid TZ shifts
+function normalizeDateString(value: any): string | null {
+  if (!value) return null;
+  if (typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value)) return value;
+  try {
+    const d = new Date(value);
+    if (isNaN(d.getTime())) return null;
+    return d.toLocaleDateString("en-CA");
+  } catch {
+    return null;
+  }
+}
+
 // Admin import endpoint (used by AdminJS Import page)
 app.post("/api/import-puzzle", adminAuth, async (req, res) => {
   const payload = req.body;
@@ -64,8 +79,9 @@ app.post("/api/import-puzzle", adminAuth, async (req, res) => {
   try {
     let imported = 0;
     for (const item of items) {
-      const date = item.date;
+      const date = normalizeDateString(item.date);
       const type = item.type;
+      const slot = Number(item.slot) || 1;
       const externalId = item.id || item.externalId || null;
       let language = (item.language || "en").toLowerCase();
       if (language === "japanese" || language === "jp") language = "ja";
@@ -95,11 +111,11 @@ app.post("/api/import-puzzle", adminAuth, async (req, res) => {
       const puzzleTypeId = typeResult.rows[0].id;
 
       await db.query(
-        `INSERT INTO puzzle_content (puzzle_id, puzzle_type_id, language, external_id, content)
-         VALUES ($1, $2, $3, $4, $5)
-         ON CONFLICT (puzzle_id, puzzle_type_id, language)
+        `INSERT INTO puzzle_content (puzzle_id, puzzle_type_id, language, slot, external_id, content)
+         VALUES ($1, $2, $3, $4, $5, $6)
+         ON CONFLICT (puzzle_id, puzzle_type_id, language, slot)
          DO UPDATE SET content = EXCLUDED.content, external_id = EXCLUDED.external_id`,
-        [puzzleId, puzzleTypeId, language, externalId, content]
+        [puzzleId, puzzleTypeId, language, slot, externalId, content]
       );
 
       imported += 1;

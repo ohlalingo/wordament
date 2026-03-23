@@ -23,8 +23,13 @@
     "express-rate-limit": "^7.5.1",
     "pg": "^8.20.0",
     "reflect-metadata": "^0.1.13",
+    "rollup": "^4.59.0",
+    "@rollup/rollup-linux-x64-gnu": "4.59.0",
     "typeorm": "^0.3.20",
     "zod": "^3.25.76"
+  },
+  "optionalDependencies": {
+    "@rollup/rollup-linux-x64-gnu": "^4.59.0"
   },
   "devDependencies": {
     "@types/cors": "^2.8.19",

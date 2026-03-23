@@ -79,7 +79,7 @@ router.get("/puzzles", async (_req, res) => {
 router.patch("/puzzle/:contentId", async (req, res) => {
   const contentId = Number(req.params.contentId);
   if (!contentId) return res.status(400).json({ error: "Invalid content id" });
-  const { content, puzzleDate, type, externalId } = req.body;
+  const { content, puzzleDate, type, externalId, slot } = req.body;
   let { language } = req.body as { language?: string };
   console.log("[PATCH /admin/puzzle/:id] id=%s body=%j", contentId, req.body);
   try {
@@ -92,14 +92,24 @@ router.patch("/puzzle/:contentId", async (req, res) => {
     if (language === "japanese" || language === "jp") language = "ja";
     if (language === "english") language = "en";
 
+    // normalize slot
+    const normalizedSlot = Number(slot ?? row.slot ?? 1) || 1;
+
+    // normalize puzzle date (YYYY-MM-DD)
+    const rawPuzzleDate = puzzleDate ?? row.puzzle_date;
+    const puzzleDateStr = rawPuzzleDate ? String(rawPuzzleDate).slice(0, 10) : null;
+    if (!puzzleDateStr || !/^\d{4}-\d{2}-\d{2}$/.test(puzzleDateStr)) {
+      return res.status(400).json({ error: "Invalid puzzle_date format. Expected YYYY-MM-DD" });
+    }
+
     // ensure puzzle date -> puzzle_id
     let puzzleId = row.puzzle_id;
-    if (puzzleDate) {
+    if (puzzleDateStr) {
       const puzzleDay = await db.query(
         `INSERT INTO puzzles (puzzle_date) VALUES ($1)
          ON CONFLICT (puzzle_date) DO UPDATE SET puzzle_date = EXCLUDED.puzzle_date
          RETURNING id`,
-        [puzzleDate]
+        [puzzleDateStr]
       );
       puzzleId = puzzleDay.rows[0].id;
     }
@@ -116,15 +126,23 @@ router.patch("/puzzle/:contentId", async (req, res) => {
       puzzleTypeId = typeRow.rows[0].id;
     }
 
+    // avoid unique conflicts when moving slot
+    await db.query(
+      `DELETE FROM puzzle_content
+       WHERE puzzle_id = $1 AND puzzle_type_id = $2 AND language = $3 AND slot = $4 AND id <> $5`,
+      [puzzleId, puzzleTypeId, language, normalizedSlot, contentId]
+    );
+
     const updated = await db.query(
       `UPDATE puzzle_content
          SET content = $1,
              language = $2,
              external_id = $3,
              puzzle_id = $4,
-             puzzle_type_id = $5
-       WHERE id = $6`,
-      [content ?? row.content, language, externalId ?? row.external_id, puzzleId, puzzleTypeId, contentId]
+             puzzle_type_id = $5,
+             slot = $6
+       WHERE id = $7`,
+      [content ?? row.content, language, externalId ?? row.external_id, puzzleId, puzzleTypeId, normalizedSlot, contentId]
     );
 
     if (!updated.rowCount) return res.status(404).json({ error: "Puzzle content not found" });
@@ -135,6 +153,8 @@ router.patch("/puzzle/:contentId", async (req, res) => {
       externalId: externalId ?? row.external_id,
       puzzleId,
       puzzleTypeId,
+      slot: normalizedSlot,
+      puzzleDate: puzzleDateStr,
     });
   } catch (err) {
     console.error("Admin update puzzle error", err);
@@ -151,6 +171,7 @@ router.get("/puzzle/:contentId", async (req, res) => {
       `SELECT pc.id,
               pc.language,
               pc.external_id,
+              pc.slot,
               pc.content,
               p.puzzle_date,
               pt.type_name
@@ -216,11 +237,15 @@ router.post("/import-puzzle", async (req, res) => {
   try {
     let imported = 0;
     for (const item of items) {
-      const date = item.date;
+      const date = String(item.date || "").slice(0, 10);
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+        return res.status(400).json({ error: "Invalid date format. Expected YYYY-MM-DD" });
+      }
       const type = item.type;
       let language = (item.language || "en").toLowerCase();
       if (language === "japanese" || language === "jp") language = "ja";
       if (language === "english") language = "en";
+      const slot = Number(item.slot ?? 1) || 1;
       const content = stripReservedFields(item.content ?? item);
       const externalId = item.id || item.externalId || null;
 
@@ -247,11 +272,11 @@ router.post("/import-puzzle", async (req, res) => {
       const puzzleTypeId = typeResult.rows[0].id;
 
       await db.query(
-        `INSERT INTO puzzle_content (puzzle_id, puzzle_type_id, language, external_id, content)
-         VALUES ($1, $2, $3, $4, $5)
-         ON CONFLICT (puzzle_id, puzzle_type_id, language)
+        `INSERT INTO puzzle_content (puzzle_id, puzzle_type_id, language, slot, external_id, content)
+         VALUES ($1, $2, $3, $4, $5, $6)
+         ON CONFLICT (puzzle_id, puzzle_type_id, language, slot)
          DO UPDATE SET content = EXCLUDED.content, external_id = EXCLUDED.external_id`,
-        [puzzleId, puzzleTypeId, language, externalId, content]
+        [puzzleId, puzzleTypeId, language, slot, externalId, content]
       );
 
       imported += 1;

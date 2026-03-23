@@ -24,6 +24,7 @@ const CreatePuzzleForm: React.FC<Props> = ({ record, action }) => {
   const [dateIso, setDateIso] = useState<string | null>(null)
   const [type, setType] = useState("crossword")
   const [language, setLanguage] = useState("en")
+  const [slot, setSlot] = useState<number>(1)
   const [json, setJson] = useState("")
   const [busy, setBusy] = useState(false)
   const currentYear = new Date().getFullYear()
@@ -100,11 +101,13 @@ const CreatePuzzleForm: React.FC<Props> = ({ record, action }) => {
       const typeVal = (detail?.type_name as string) || (p.type_name as string) || (p.type as string)
       const dateVal = (detail?.puzzle_date as string) || (p.puzzle_date as string) || (p.date as string)
       const extId = (detail?.external_id as string) || (p.externalId as string) || (p.id as string) || ""
+      const slotVal = detail?.slot ?? p.slot ?? 1
 
       setId(extId)
       setLanguage(langVal.toLowerCase())
       setType(typeVal || "crossword")
-      if (dateVal) setDateIso(dateVal)
+      if (dateVal) setDateIso(dateVal.split("T")[0])
+      setSlot(Number(slotVal) || 1)
 
       if (contentVal !== undefined && contentVal !== null) {
         if (typeof contentVal === "string") setJson(contentVal)
@@ -119,6 +122,7 @@ const CreatePuzzleForm: React.FC<Props> = ({ record, action }) => {
     if (!dateIso && !isEdit) return alert("Date is required.")
     if (!id.trim()) return alert("ID is required.")
     if (!json.trim()) return alert("Paste puzzle JSON.")
+    if (!dateIso) return alert("Pick a puzzle date.")
 
     let parsed: any
     try {
@@ -135,6 +139,13 @@ const CreatePuzzleForm: React.FC<Props> = ({ record, action }) => {
 
     setBusy(true)
     try {
+      const dateStr =
+        typeof dateIso === "string"
+          ? dateIso
+          : dateIso
+          ? (dateIso as Date).toISOString().slice(0, 10)
+          : null;
+
       if (isEdit) {
         const recId =
           (record as any)?.id ||
@@ -151,9 +162,10 @@ const CreatePuzzleForm: React.FC<Props> = ({ record, action }) => {
           credentials: "include",
           body: JSON.stringify({
             content: parsed,
-            puzzleDate: dateIso,
+            puzzleDate: dateStr,
             type,
             language,
+            slot,
             externalId: id,
           }),
         })
@@ -161,7 +173,7 @@ const CreatePuzzleForm: React.FC<Props> = ({ record, action }) => {
         if (!res.ok) throw new Error(body?.error || "Update failed")
         alert("Updated puzzle content")
       } else {
-        const item = { id, date: dateIso, type, language, content: parsed }
+        const item = { id, date: dateStr, type, language, slot, content: parsed }
         const base = window.location.origin
         const res = await fetch(`${base}/api/import-puzzle`, {
           method: "POST",
@@ -199,8 +211,13 @@ const CreatePuzzleForm: React.FC<Props> = ({ record, action }) => {
         <Box display="flex" flexDirection="column" gap="4px">
           <Label>Puzzle Date</Label>
           <DatePicker
-            value={dateIso || undefined}
-            onChange={(val) => setDateIso(val)}
+            value={dateIso ? new Date(dateIso + "T00:00:00") : undefined}
+            onChange={(val) => {
+              const v: any = val
+              if (v instanceof Date) setDateIso(v.toISOString().slice(0, 10))
+              else if (typeof v === "string") setDateIso(v.split("T")[0])
+              else setDateIso(null)
+            }}
             propertyType="date"
             placeholderText="YYYY-MM-DD"
             dateFormat="yyyy-MM-dd"
@@ -254,6 +271,16 @@ const CreatePuzzleForm: React.FC<Props> = ({ record, action }) => {
             onChange={(opt) => setLanguage((opt as any)?.value || "en")}
             options={LANGS}
             variant="filter"
+          />
+        </Box>
+        <Box display="flex" flexDirection="column" gap="4px">
+          <Label>Slot</Label>
+          <Input
+            type="number"
+            value={slot}
+            onChange={(e) => setSlot(Math.max(1, Number(e.target.value) || 1))}
+            min={1}
+            width="100%"
           />
         </Box>
       </Box>

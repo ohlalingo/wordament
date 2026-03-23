@@ -1,33 +1,24 @@
 import { Request, Response, NextFunction } from "express";
 import { db } from "../db.js";
 
-// Admin guard: prefer AdminJS session, then shared admin token, then user-id check.
+// Admin guard: prefer shared admin token, fall back to user id check.
 export async function adminAuth(req: Request, res: Response, next: NextFunction) {
+  // Allow AdminJS internal API (resources, dashboard) to be handled by its own auth/session middleware.
   const path = req.path || "";
-  const originalUrl = req.originalUrl || "";
-
-  // 1) If AdminJS session is present, always allow
-  const sessionUser = (req as any)?.session?.adminUser;
-  if (sessionUser) return next();
-
-  // 2) Allow AdminJS internal routes
-  if (
-    originalUrl.startsWith("/admin") ||
-    path.startsWith("/resources") ||
-    path.startsWith("/dashboard") ||
-    path.startsWith("/pages") ||
-    path.startsWith("/api")
-  ) {
+  if (path.startsWith("/admin")))){
     return next();
   }
 
-  // 3) Allow shared admin token
+  // If AdminJS session is present, allow
+  // (buildAuthenticatedRouter sets req.session.adminUser)
+  const sessionUser = (req as any)?.session?.adminUser;
+  if (sessionUser) return next();
+
   const token = req.header("x-admin-token");
   if (token && process.env.ADMIN_TOKEN && token === process.env.ADMIN_TOKEN) {
     return next();
   }
 
-  // 4) Fallback: x-user-id + email check
   const userId = Number(req.header("x-user-id"));
   if (!userId) {
     return res.status(401).json({ error: "Missing x-user-id or x-admin-token header" });
@@ -37,10 +28,10 @@ export async function adminAuth(req: Request, res: Response, next: NextFunction)
     const { rows } = await db.query("SELECT email FROM users WHERE id = $1", [userId]);
     if (!rows.length) return res.status(401).json({ error: "User not found" });
 
+    // Enforce admin by email (no role column)
     if (process.env.ADMIN_EMAIL && rows[0].email !== process.env.ADMIN_EMAIL) {
       return res.status(403).json({ error: "Admin only" });
     }
-
     return next();
   } catch (err: any) {
     console.error("adminAuth error", err);
