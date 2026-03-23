@@ -259,7 +259,6 @@ export async function buildAdminRouter(dbUrlConfig: {
               },
             },
             puzzle_date: { isVisible: false },
-            type_name: { isVisible: false },
           },
           actions: {
             list: {
