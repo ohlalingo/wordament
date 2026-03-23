@@ -1,3 +1,5 @@
+import fs from "fs";
+import path from "path";
 import { Router } from "express";
 import { db } from "../db.js";
 import { z } from "zod";
@@ -8,6 +10,7 @@ const uploadSchema = z.object({
     type: z.string().min(1),
     language: z.string().min(2).max(5).optional(),
     id: z.string().min(1).optional(),
+    slot: z.number().int().min(1).optional(),
     content: z.any(),
 });
 const stripReservedFields = (content) => {
@@ -30,34 +33,75 @@ const normalizeLang = (lang) => {
         return "en";
     return l;
 };
-function todayLocalISO() {
-    return new Date().toLocaleDateString("en-CA");
+const normalizeDateString = (value) => {
+    if (!value)
+        return null;
+    if (typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value))
+        return value;
+    try {
+        const d = new Date(value);
+        if (isNaN(d.getTime()))
+            return null;
+        return d.toLocaleDateString("en-CA");
+    }
+    catch {
+        return null;
+    }
+};
+// Use UTC date to avoid timezone drift (so "today" is consistent worldwide)
+function todayUTCISO() {
+    return new Date().toISOString().slice(0, 10);
 }
 // GET /puzzle/today - returns today's puzzles grouped by type
 router.get("/today", async (req, res) => {
-    const today = todayLocalISO(); // YYYY-MM-DD in server local TZ
+    const today = todayUTCISO(); // YYYY-MM-DD in UTC
     const lang = normalizeLang(req.query.lang);
     try {
+        const params = [today];
+        let whereLang = "";
+        if (lang) {
+            whereLang = "AND pc.language = $2";
+            params.push(lang);
+        }
         const { rows } = await db.query(`SELECT pc.id AS puzzle_content_id,
+              pc.puzzle_id AS puzzle_id,
               pt.type_name,
               pc.language,
+              pc.slot,
               pc.content
        FROM puzzle_content pc
        JOIN puzzles p ON p.id = pc.puzzle_id
        JOIN puzzle_types pt ON pt.id = pc.puzzle_type_id
-       WHERE p.puzzle_date = $1 AND pc.language = $2`, [today, lang]);
-        if (!rows.length) {
-            return res.status(404).json({ error: "No puzzles found for today" });
-        }
+       WHERE p.puzzle_date = $1 ${whereLang}
+       ORDER BY pt.type_name, pc.slot, pc.id ASC`, params);
         const grouped = {};
         for (const row of rows) {
-            grouped[row.type_name] = {
+            let parsed = row.content;
+            try {
+                if (typeof parsed === "string")
+                    parsed = JSON.parse(parsed);
+                if (typeof parsed === "string")
+                    parsed = JSON.parse(parsed);
+            }
+            catch (e) {
+                console.error("JSON parse failed:", row.content);
+                parsed = {};
+            }
+            if (!grouped[row.type_name])
+                grouped[row.type_name] = [];
+            grouped[row.type_name].push({
+                slot: row.slot ?? 1,
                 puzzleContentId: row.puzzle_content_id,
+                puzzleId: row.puzzle_id,
                 language: row.language,
-                ...row.content,
-            };
+                ...parsed,
+            });
         }
-        return res.json(grouped);
+        return res.json({
+            crossword: grouped.crossword ?? [],
+            wordsearch: grouped.wordsearch ?? [],
+            unjumble: grouped.unjumble ?? [],
+        });
     }
     catch (err) {
         console.error("Error fetching today's puzzles", err);
@@ -70,11 +114,16 @@ router.post("/upload", adminAuth, async (req, res) => {
     if (!parsed.success) {
         return res.status(400).json({ error: parsed.error.flatten() });
     }
-    const { puzzleDate, type, content, id } = parsed.data;
+    const rawDate = parsed.data.puzzleDate;
+    const puzzleDate = normalizeDateString(rawDate);
+    if (!puzzleDate)
+        return res.status(400).json({ error: "Invalid puzzleDate" });
+    const { type, content, id } = parsed.data;
+    const slot = parsed.data.slot ?? 1;
     let language = normalizeLang(parsed.data.language);
     const cleanContent = stripReservedFields(content);
     try {
-        // ensure puzzle day exists
+        // ensure puzzle day exists (use normalized YYYY-MM-DD)
         const puzzleDay = await db.query(`INSERT INTO puzzles (puzzle_date) VALUES ($1)
        ON CONFLICT (puzzle_date) DO UPDATE SET puzzle_date = EXCLUDED.puzzle_date
        RETURNING id`, [puzzleDate]);
@@ -84,11 +133,11 @@ router.post("/upload", adminAuth, async (req, res) => {
        ON CONFLICT (type_name) DO UPDATE SET type_name = EXCLUDED.type_name
        RETURNING id`, [type]);
         const puzzleTypeId = typeRow.rows[0].id;
-        // replace existing content for this date/type
-        await db.query(`DELETE FROM puzzle_content WHERE puzzle_id = $1 AND puzzle_type_id = $2 AND language = $3`, [puzzleId, puzzleTypeId, language]);
-        const inserted = await db.query(`INSERT INTO puzzle_content (puzzle_id, puzzle_type_id, language, external_id, content)
-       VALUES ($1,$2,$3,$4,$5)
-       RETURNING id`, [puzzleId, puzzleTypeId, language, id || null, cleanContent]);
+        const inserted = await db.query(`INSERT INTO puzzle_content (puzzle_id, puzzle_type_id, language, slot, external_id, content)
+       VALUES ($1,$2,$3,$4,$5,$6)
+       ON CONFLICT (puzzle_id, puzzle_type_id, language, slot)
+       DO UPDATE SET content = EXCLUDED.content, external_id = EXCLUDED.external_id
+       RETURNING id`, [puzzleId, puzzleTypeId, language, slot, id || null, cleanContent]);
         return res.status(201).json({
             puzzleContentId: inserted.rows[0].id,
             puzzleId,
@@ -108,7 +157,7 @@ router.post("/upload", adminAuth, async (req, res) => {
 // 4) If nothing is found, fall back to bundled JSON.
 router.get("/demo", async (req, res) => {
     try {
-        const today = todayLocalISO();
+        const today = todayUTCISO();
         const lang = normalizeLang(req.query.lang);
         const fetchDay = async (date, language) => {
             if (!date)
@@ -120,6 +169,7 @@ router.get("/demo", async (req, res) => {
                 params.push(language);
             }
             const { rows } = await db.query(`SELECT pc.id AS puzzle_content_id,
+                pc.puzzle_id AS puzzle_id,
                 pt.type_name,
                 pc.language,
                 pc.content
@@ -157,16 +207,29 @@ router.get("/demo", async (req, res) => {
         if (rows.length) {
             const grouped = {};
             for (const row of rows) {
+                let parsed = row.content;
+                try {
+                    if (typeof parsed === "string")
+                        parsed = JSON.parse(parsed);
+                    if (typeof parsed === "string")
+                        parsed = JSON.parse(parsed);
+                }
+                catch (e) {
+                    console.error("JSON parse failed:", row.content);
+                    parsed = {};
+                }
                 grouped[row.type_name] = {
                     puzzleContentId: row.puzzle_content_id,
+                    puzzleId: row.puzzle_id,
                     language: row.language,
-                    ...row.content,
+                    ...parsed,
                 };
             }
             // If crossword missing, fall back to bundled demo crossword
             if (!grouped.crossword) {
                 try {
-                    const crossword = require("../../puzzles/crossword/demo.json");
+                    const base = path.resolve("puzzles");
+                    const crossword = JSON.parse(fs.readFileSync(path.join(base, "crossword/demo.json"), "utf-8"));
                     grouped.crossword = crossword;
                 }
                 catch (err) {
@@ -181,9 +244,10 @@ router.get("/demo", async (req, res) => {
     }
     // Fallback to JSON files if DB not populated
     try {
-        const crossword = require("../../puzzles/crossword/demo.json");
-        const wordsearch = require("../../puzzles/wordsearch/demo.json");
-        const unjumble = require("../../puzzles/unjumble/demo.json");
+        const base = path.resolve("puzzles");
+        const crossword = JSON.parse(fs.readFileSync(path.join(base, "crossword/demo.json"), "utf-8"));
+        const wordsearch = JSON.parse(fs.readFileSync(path.join(base, "wordsearch/demo.json"), "utf-8"));
+        const unjumble = JSON.parse(fs.readFileSync(path.join(base, "unjumble/demo.json"), "utf-8"));
         return res.json({ crossword, wordsearch, unjumble });
     }
     catch (err) {
@@ -200,6 +264,7 @@ router.get("/:date", async (req, res) => {
     }
     try {
         const { rows } = await db.query(`SELECT pc.id AS puzzle_content_id,
+              pc.puzzle_id AS puzzle_id,
               pt.type_name,
               pc.language,
               pc.content
@@ -207,13 +272,26 @@ router.get("/:date", async (req, res) => {
        JOIN puzzles p ON p.id = pc.puzzle_id
        JOIN puzzle_types pt ON pt.id = pc.puzzle_type_id
        WHERE p.puzzle_date = $1 AND pc.language = $2`, [date, lang]);
-        if (!rows.length)
-            return res.status(404).json({ error: "No puzzles for date" });
         const grouped = {};
         for (const row of rows) {
-            grouped[row.type_name] = { puzzleContentId: row.puzzle_content_id, language: row.language, ...row.content };
+            let parsed = row.content;
+            try {
+                if (typeof parsed === "string")
+                    parsed = JSON.parse(parsed);
+                if (typeof parsed === "string")
+                    parsed = JSON.parse(parsed);
+            }
+            catch (e) {
+                console.error("JSON parse failed:", row.content);
+                parsed = {};
+            }
+            grouped[row.type_name] = { puzzleContentId: row.puzzle_content_id, puzzleId: row.puzzle_id, language: row.language, ...parsed };
         }
-        return res.json(grouped);
+        return res.json({
+            crossword: grouped.crossword ?? null,
+            wordsearch: grouped.wordsearch ?? null,
+            unjumble: grouped.unjumble ?? null,
+        });
     }
     catch (err) {
         console.error("Error fetching puzzles by date", err);
@@ -252,7 +330,18 @@ router.get("/export", async (req, res) => {
             if (!grouped[row.puzzle_date])
                 grouped[row.puzzle_date] = {};
             const typeBucket = grouped[row.puzzle_date][row.type_name] || {};
-            typeBucket[row.language] = row.content;
+            let parsed = row.content;
+            try {
+                if (typeof parsed === "string")
+                    parsed = JSON.parse(parsed);
+                if (typeof parsed === "string")
+                    parsed = JSON.parse(parsed);
+            }
+            catch (e) {
+                console.error("JSON parse failed:", row.content);
+                parsed = {};
+            }
+            typeBucket[row.language] = parsed;
             grouped[row.puzzle_date][row.type_name] = typeBucket;
         }
         return res.json(grouped);

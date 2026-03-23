@@ -16,6 +16,7 @@ const CreatePuzzleForm = ({ record, action }) => {
     const [dateIso, setDateIso] = useState(null);
     const [type, setType] = useState("crossword");
     const [language, setLanguage] = useState("en");
+    const [slot, setSlot] = useState(1);
     const [json, setJson] = useState("");
     const [busy, setBusy] = useState(false);
     const currentYear = new Date().getFullYear();
@@ -93,11 +94,13 @@ const CreatePuzzleForm = ({ record, action }) => {
             const typeVal = detail?.type_name || p.type_name || p.type;
             const dateVal = detail?.puzzle_date || p.puzzle_date || p.date;
             const extId = detail?.external_id || p.externalId || p.id || "";
+            const slotVal = detail?.slot ?? p.slot ?? 1;
             setId(extId);
             setLanguage(langVal.toLowerCase());
             setType(typeVal || "crossword");
             if (dateVal)
-                setDateIso(dateVal);
+                setDateIso(dateVal.split("T")[0]);
+            setSlot(Number(slotVal) || 1);
             if (contentVal !== undefined && contentVal !== null) {
                 if (typeof contentVal === "string")
                     setJson(contentVal);
@@ -114,6 +117,8 @@ const CreatePuzzleForm = ({ record, action }) => {
             return alert("ID is required.");
         if (!json.trim())
             return alert("Paste puzzle JSON.");
+        if (!dateIso)
+            return alert("Pick a puzzle date.");
         let parsed;
         try {
             parsed = JSON.parse(json);
@@ -130,6 +135,11 @@ const CreatePuzzleForm = ({ record, action }) => {
             headers["x-admin-token"] = adminToken;
         setBusy(true);
         try {
+            const dateStr = typeof dateIso === "string"
+                ? dateIso
+                : dateIso
+                    ? dateIso.toISOString().slice(0, 10)
+                    : null;
             if (isEdit) {
                 const recId = record?.id ||
                     record?.params?.id ||
@@ -146,9 +156,10 @@ const CreatePuzzleForm = ({ record, action }) => {
                     credentials: "include",
                     body: JSON.stringify({
                         content: parsed,
-                        puzzleDate: dateIso,
+                        puzzleDate: dateStr,
                         type,
                         language,
+                        slot,
                         externalId: id,
                     }),
                 });
@@ -158,7 +169,7 @@ const CreatePuzzleForm = ({ record, action }) => {
                 alert("Updated puzzle content");
             }
             else {
-                const item = { id, date: dateIso, type, language, content: parsed };
+                const item = { id, date: dateStr, type, language, slot, content: parsed };
                 const base = window.location.origin;
                 const res = await fetch(`${base}/api/import-puzzle`, {
                     method: "POST",
@@ -182,6 +193,14 @@ const CreatePuzzleForm = ({ record, action }) => {
             setBusy(false);
         }
     };
-    return (_jsxs(Box, { variant: "white", p: "xl", style: { maxWidth: 900 }, children: [_jsx("h2", { style: { marginTop: 0 }, children: isEdit ? "Edit Puzzle Content" : "Create Puzzle" }), _jsxs(Box, { display: "grid", gridTemplateColumns: "1fr 1fr", gridGap: "16px", mb: "lg", children: [_jsxs(Box, { display: "flex", flexDirection: "column", gap: "4px", children: [_jsx(Label, { children: "Puzzle ID" }), _jsx(Input, { value: id, onChange: (e) => setId(e.target.value), placeholder: "Unique per language", width: "100%" })] }), _jsxs(Box, { display: "flex", flexDirection: "column", gap: "4px", children: [_jsx(Label, { children: "Puzzle Date" }), _jsx(DatePicker, { value: dateIso || undefined, onChange: (val) => setDateIso(val), propertyType: "date", placeholderText: "YYYY-MM-DD", dateFormat: "yyyy-MM-dd", shouldCloseOnSelect: true, popperPlacement: "bottom-start", renderCustomHeader: ({ date, changeYear, changeMonth, decreaseMonth, increaseMonth, }) => (_jsxs(Box, { display: "flex", alignItems: "center", justifyContent: "space-between", px: "md", py: "sm", children: [_jsx("button", { type: "button", onClick: decreaseMonth, style: { background: "none", border: "none" }, children: "\u2039" }), _jsxs(Box, { display: "flex", gap: "8px", children: [_jsx(Select, { value: { value: months[date.getMonth()], label: months[date.getMonth()] }, onChange: (opt) => changeMonth(months.findIndex((m) => m === opt?.value)), options: months.map((m) => ({ value: m, label: m })), variant: "filter" }), _jsx(Select, { value: { value: date.getFullYear(), label: String(date.getFullYear()) }, onChange: (opt) => changeYear(Number(opt?.value)), options: years.map((y) => ({ value: y, label: String(y) })), variant: "filter" })] }), _jsx("button", { type: "button", onClick: increaseMonth, style: { background: "none", border: "none" }, children: "\u203A" })] })) })] }), _jsxs(Box, { display: "flex", flexDirection: "column", gap: "4px", children: [_jsx(Label, { children: "Puzzle Type" }), _jsx(Select, { value: TYPES.find((o) => o.value === type), onChange: (opt) => setType(opt?.value || "crossword"), options: TYPES, variant: "filter" })] }), _jsxs(Box, { display: "flex", flexDirection: "column", gap: "4px", children: [_jsx(Label, { children: "Language" }), _jsx(Select, { value: LANGS.find((o) => o.value === language), onChange: (opt) => setLanguage(opt?.value || "en"), options: LANGS, variant: "filter" })] })] }), _jsx(TextArea, { label: "Puzzle JSON", rows: 18, width: "100%", value: json, onChange: (e) => setJson(e.target.value), placeholder: "Paste puzzle JSON (without id/date/language)" }), _jsx(Button, { mt: "lg", variant: "primary", onClick: upload, disabled: busy, children: busy ? "Saving..." : "Save Puzzle" })] }));
+    return (_jsxs(Box, { variant: "white", p: "xl", style: { maxWidth: 900 }, children: [_jsx("h2", { style: { marginTop: 0 }, children: isEdit ? "Edit Puzzle Content" : "Create Puzzle" }), _jsxs(Box, { display: "grid", gridTemplateColumns: "1fr 1fr", gridGap: "16px", mb: "lg", children: [_jsxs(Box, { display: "flex", flexDirection: "column", gap: "4px", children: [_jsx(Label, { children: "Puzzle ID" }), _jsx(Input, { value: id, onChange: (e) => setId(e.target.value), placeholder: "Unique per language", width: "100%" })] }), _jsxs(Box, { display: "flex", flexDirection: "column", gap: "4px", children: [_jsx(Label, { children: "Puzzle Date" }), _jsx(DatePicker, { value: dateIso ? new Date(dateIso + "T00:00:00") : undefined, onChange: (val) => {
+                                    const v = val;
+                                    if (v instanceof Date)
+                                        setDateIso(v.toISOString().slice(0, 10));
+                                    else if (typeof v === "string")
+                                        setDateIso(v.split("T")[0]);
+                                    else
+                                        setDateIso(null);
+                                }, propertyType: "date", placeholderText: "YYYY-MM-DD", dateFormat: "yyyy-MM-dd", shouldCloseOnSelect: true, popperPlacement: "bottom-start", renderCustomHeader: ({ date, changeYear, changeMonth, decreaseMonth, increaseMonth, }) => (_jsxs(Box, { display: "flex", alignItems: "center", justifyContent: "space-between", px: "md", py: "sm", children: [_jsx("button", { type: "button", onClick: decreaseMonth, style: { background: "none", border: "none" }, children: "\u2039" }), _jsxs(Box, { display: "flex", gap: "8px", children: [_jsx(Select, { value: { value: months[date.getMonth()], label: months[date.getMonth()] }, onChange: (opt) => changeMonth(months.findIndex((m) => m === opt?.value)), options: months.map((m) => ({ value: m, label: m })), variant: "filter" }), _jsx(Select, { value: { value: date.getFullYear(), label: String(date.getFullYear()) }, onChange: (opt) => changeYear(Number(opt?.value)), options: years.map((y) => ({ value: y, label: String(y) })), variant: "filter" })] }), _jsx("button", { type: "button", onClick: increaseMonth, style: { background: "none", border: "none" }, children: "\u203A" })] })) })] }), _jsxs(Box, { display: "flex", flexDirection: "column", gap: "4px", children: [_jsx(Label, { children: "Puzzle Type" }), _jsx(Select, { value: TYPES.find((o) => o.value === type), onChange: (opt) => setType(opt?.value || "crossword"), options: TYPES, variant: "filter" })] }), _jsxs(Box, { display: "flex", flexDirection: "column", gap: "4px", children: [_jsx(Label, { children: "Language" }), _jsx(Select, { value: LANGS.find((o) => o.value === language), onChange: (opt) => setLanguage(opt?.value || "en"), options: LANGS, variant: "filter" })] }), _jsxs(Box, { display: "flex", flexDirection: "column", gap: "4px", children: [_jsx(Label, { children: "Slot" }), _jsx(Input, { type: "number", value: slot, onChange: (e) => setSlot(Math.max(1, Number(e.target.value) || 1)), min: 1, width: "100%" })] })] }), _jsx(TextArea, { label: "Puzzle JSON", rows: 18, width: "100%", value: json, onChange: (e) => setJson(e.target.value), placeholder: "Paste puzzle JSON (without id/date/language)" }), _jsx(Button, { mt: "lg", variant: "primary", onClick: upload, disabled: busy, children: busy ? "Saving..." : "Save Puzzle" })] }));
 };
 export default CreatePuzzleForm;
