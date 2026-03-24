@@ -53,6 +53,9 @@ app.get("/", (_req, res) => {
 app.use("/puzzle", puzzleRoutes);
 app.use("/auth", authLimiter, authRoutes);
 app.use("/attempt", attemptLimiter, attemptRoutes);
+// Expose leaderboard endpoints under /api to match frontend calls
+app.use("/api", leaderboardRoutes);
+// Legacy prefix kept for old clients
 app.use("/leaderboard", leaderboardRoutes);
 
 // Remove reserved metadata keys from stored JSON content
