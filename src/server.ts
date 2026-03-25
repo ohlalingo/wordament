@@ -50,11 +50,16 @@ app.get("/", (_req, res) => {
   res.json({ message: "CyberWordament backend is running" });
 });
 
+// Primary API routes (with /api prefix)
+app.use("/api/puzzle", puzzleRoutes);
+app.use("/api/auth", authLimiter, authRoutes);
+app.use("/api/attempt", attemptLimiter, attemptRoutes);
+app.use("/api/leaderboard", leaderboardRoutes);
+
+// Legacy routes (backward compatibility)
 app.use("/puzzle", puzzleRoutes);
 app.use("/auth", authLimiter, authRoutes);
 app.use("/attempt", attemptLimiter, attemptRoutes);
-// Expose leaderboard endpoints under /api to match frontend calls
-app.use("/api", leaderboardRoutes);
 // Legacy prefix kept for old clients
 app.use("/leaderboard", leaderboardRoutes);
 
