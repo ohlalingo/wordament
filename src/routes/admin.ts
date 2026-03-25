@@ -117,6 +117,7 @@ router.patch("/puzzle/:contentId", async (req, res) => {
     // ensure puzzle type -> puzzle_type_id
     let puzzleTypeId = row.puzzle_type_id;
     if (type) {
+      // prevent duplicate type_name race: unique constraint ux_puzzle_types_type_name
       const typeRow = await db.query(
         `INSERT INTO puzzle_types (type_name) VALUES ($1)
          ON CONFLICT (type_name) DO UPDATE SET type_name = EXCLUDED.type_name
