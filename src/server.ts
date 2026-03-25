@@ -55,6 +55,8 @@ app.use("/api/puzzle", puzzleRoutes);
 app.use("/api/auth", authLimiter, authRoutes);
 app.use("/api/attempt", attemptLimiter, attemptRoutes);
 app.use("/api/leaderboard", leaderboardRoutes);
+// Compatibility: allow /api/regional-champions and other legacy paths
+app.use("/api", leaderboardRoutes);
 
 // Legacy routes (backward compatibility)
 app.use("/puzzle", puzzleRoutes);
