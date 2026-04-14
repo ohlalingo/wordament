@@ -34,7 +34,10 @@ export async function adminAuth(req: Request, res: Response, next: NextFunction)
   }
 
   try {
-    const { rows } = await db.query("SELECT email FROM users WHERE id = $1", [userId]);
+    const { rows } = await db.query(
+      "SELECT TOP 1 email FROM users WHERE id = $1",
+      [userId]
+    );
     if (!rows.length) return res.status(401).json({ error: "User not found" });
 
     if (process.env.ADMIN_EMAIL && rows[0].email !== process.env.ADMIN_EMAIL) {

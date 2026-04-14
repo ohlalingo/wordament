@@ -26,6 +26,61 @@ function getPagination(req: any) {
   return { page, limit, offset };
 }
 
+// ── Shared MERGE helpers (mirrors puzzle.ts) ─────────────────────────────────
+
+async function upsertPuzzleDay(puzzleDate: string): Promise<number> {
+  const { rows } = await db.query(
+    `MERGE puzzles WITH (HOLDLOCK) AS T
+     USING (VALUES ($1)) AS S(puzzle_date)
+     ON T.puzzle_date = S.puzzle_date
+     WHEN NOT MATCHED THEN INSERT (puzzle_date) VALUES (S.puzzle_date)
+     WHEN MATCHED    THEN UPDATE SET puzzle_date = S.puzzle_date
+     OUTPUT INSERTED.id;`,
+    [puzzleDate]
+  );
+  return rows[0].id as number;
+}
+
+async function upsertPuzzleType(typeName: string): Promise<number> {
+  const { rows } = await db.query(
+    `MERGE puzzle_types WITH (HOLDLOCK) AS T
+     USING (VALUES ($1)) AS S(type_name)
+     ON T.type_name = S.type_name
+     WHEN NOT MATCHED THEN INSERT (type_name) VALUES (S.type_name)
+     WHEN MATCHED    THEN UPDATE SET type_name = S.type_name
+     OUTPUT INSERTED.id;`,
+    [typeName]
+  );
+  return rows[0].id as number;
+}
+
+async function upsertPuzzleContent(
+  puzzleId: number,
+  puzzleTypeId: number,
+  language: string,
+  slot: number,
+  externalId: string | null,
+  content: string
+): Promise<void> {
+  await db.query(
+    `MERGE puzzle_content WITH (HOLDLOCK) AS T
+     USING (VALUES ($1,$2,$3,$4,$5,$6))
+       AS S(puzzle_id, puzzle_type_id, language, slot, external_id, content)
+     ON  T.puzzle_id      = S.puzzle_id
+     AND T.puzzle_type_id = S.puzzle_type_id
+     AND T.language       = S.language
+     AND T.slot           = S.slot
+     WHEN NOT MATCHED THEN
+       INSERT (puzzle_id, puzzle_type_id, language, slot, external_id, content)
+       VALUES (S.puzzle_id, S.puzzle_type_id, S.language, S.slot, S.external_id, S.content)
+     WHEN MATCHED THEN
+       UPDATE SET content = S.content, external_id = S.external_id;`,
+    [puzzleId, puzzleTypeId, language, slot, externalId, content]
+  );
+}
+
+// ── Routes ────────────────────────────────────────────────────────────────────
+
 // GET /admin/users?page=&limit=
 router.get("/users", async (req, res) => {
   const { limit, offset } = getPagination(req);
@@ -34,8 +89,8 @@ router.get("/users", async (req, res) => {
       `SELECT id, name, email, region, language, role, created_at
        FROM users
        ORDER BY id
-       LIMIT $1 OFFSET $2`,
-      [limit, offset]
+       OFFSET $1 ROWS FETCH NEXT $2 ROWS ONLY`,
+      [offset, limit]
     );
     return res.json(rows);
   } catch (err) {
@@ -57,18 +112,33 @@ router.delete("/users/:id", async (req, res) => {
   }
 });
 
-// GET /admin/puzzles : list puzzle days and available types
+// GET /admin/puzzles - list puzzle days and available types
+// array_agg(DISTINCT ...) doesn't exist in MSSQL — aggregate in JS instead
 router.get("/puzzles", async (_req, res) => {
   try {
     const { rows } = await db.query(
-      `SELECT p.puzzle_date, array_agg(DISTINCT pt.type_name) AS types
+      `SELECT p.puzzle_date, pt.type_name
        FROM puzzle_content pc
        JOIN puzzles p ON p.id = pc.puzzle_id
        JOIN puzzle_types pt ON pt.id = pc.puzzle_type_id
-       GROUP BY p.puzzle_date
-       ORDER BY p.puzzle_date DESC`
+       ORDER BY p.puzzle_date DESC, pt.type_name`
     );
-    return res.json(rows);
+
+    // Group by date in JS, collecting distinct type names
+    const map = new Map<string, Set<string>>();
+    for (const row of rows) {
+      const dateKey =
+        row.puzzle_date instanceof Date
+          ? row.puzzle_date.toISOString().slice(0, 10)
+          : String(row.puzzle_date).slice(0, 10);
+      if (!map.has(dateKey)) map.set(dateKey, new Set());
+      map.get(dateKey)!.add(row.type_name);
+    }
+    const result = Array.from(map.entries()).map(([puzzle_date, types]) => ({
+      puzzle_date,
+      types: Array.from(types),
+    }));
+    return res.json(result);
   } catch (err) {
     console.error("Admin list puzzles error", err);
     return res.status(500).json({ error: "Failed to list puzzles" });
@@ -84,7 +154,7 @@ router.patch("/puzzle/:contentId", async (req, res) => {
   console.log("[PATCH /admin/puzzle/:id] id=%s body=%j", contentId, req.body);
   try {
     const existing = await db.query("SELECT * FROM puzzle_content WHERE id = $1", [contentId]);
-    if (!existing.rowCount) return res.status(404).json({ error: "Puzzle content not found" });
+    if (!existing.rows.length) return res.status(404).json({ error: "Puzzle content not found" });
     const row = existing.rows[0];
 
     // normalize language
@@ -97,59 +167,52 @@ router.patch("/puzzle/:contentId", async (req, res) => {
 
     // normalize puzzle date (YYYY-MM-DD)
     const rawPuzzleDate = puzzleDate ?? row.puzzle_date;
-    const puzzleDateStr = rawPuzzleDate ? String(rawPuzzleDate).slice(0, 10) : null;
+    const puzzleDateStr = rawPuzzleDate
+      ? rawPuzzleDate instanceof Date
+        ? rawPuzzleDate.toISOString().slice(0, 10)
+        : String(rawPuzzleDate).slice(0, 10)
+      : null;
     if (!puzzleDateStr || !/^\d{4}-\d{2}-\d{2}$/.test(puzzleDateStr)) {
       return res.status(400).json({ error: "Invalid puzzle_date format. Expected YYYY-MM-DD" });
     }
 
-    // ensure puzzle date -> puzzle_id
-    let puzzleId = row.puzzle_id;
-    if (puzzleDateStr) {
-      const puzzleDay = await db.query(
-        `INSERT INTO puzzles (puzzle_date) VALUES ($1)
-         ON CONFLICT (puzzle_date) DO UPDATE SET puzzle_date = EXCLUDED.puzzle_date
-         RETURNING id`,
-        [puzzleDateStr]
-      );
-      puzzleId = puzzleDay.rows[0].id;
-    }
+    // ensure puzzle date -> puzzle_id (MERGE)
+    const puzzleId = await upsertPuzzleDay(puzzleDateStr);
 
-    // ensure puzzle type -> puzzle_type_id
+    // ensure puzzle type -> puzzle_type_id (MERGE)
     let puzzleTypeId = row.puzzle_type_id;
     if (type) {
-      // prevent duplicate type_name race: unique constraint ux_puzzle_types_type_name
-      const typeRow = await db.query(
-        `INSERT INTO puzzle_types (type_name) VALUES ($1)
-         ON CONFLICT (type_name) DO UPDATE SET type_name = EXCLUDED.type_name
-         RETURNING id`,
-        [type]
-      );
-      puzzleTypeId = typeRow.rows[0].id;
+      puzzleTypeId = await upsertPuzzleType(type);
     }
 
-    // avoid unique conflicts when moving slot
+    // remove conflicting row when slot changes (avoid unique-constraint violation on UPDATE)
     await db.query(
       `DELETE FROM puzzle_content
        WHERE puzzle_id = $1 AND puzzle_type_id = $2 AND language = $3 AND slot = $4 AND id <> $5`,
       [puzzleId, puzzleTypeId, language, normalizedSlot, contentId]
     );
 
+    // Ensure content is stored as a string
+    const contentVal = content !== undefined
+      ? (typeof content === "string" ? content : JSON.stringify(content))
+      : (typeof row.content === "string" ? row.content : JSON.stringify(row.content));
+
     const updated = await db.query(
       `UPDATE puzzle_content
-         SET content = $1,
-             language = $2,
-             external_id = $3,
-             puzzle_id = $4,
-             puzzle_type_id = $5,
-             slot = $6
+         SET content         = $1,
+             language        = $2,
+             external_id     = $3,
+             puzzle_id       = $4,
+             puzzle_type_id  = $5,
+             slot            = $6
        WHERE id = $7`,
-      [content ?? row.content, language, externalId ?? row.external_id, puzzleId, puzzleTypeId, normalizedSlot, contentId]
+      [contentVal, language, externalId ?? row.external_id, puzzleId, puzzleTypeId, normalizedSlot, contentId]
     );
 
     if (!updated.rowCount) return res.status(404).json({ error: "Puzzle content not found" });
     return res.json({
       updated: updated.rowCount,
-      content: content ?? row.content,
+      content: contentVal,
       language,
       externalId: externalId ?? row.external_id,
       puzzleId,
@@ -163,7 +226,7 @@ router.patch("/puzzle/:contentId", async (req, res) => {
   }
 });
 
-// GET /admin/puzzle/:contentId - fetch full puzzle content with date/type names for editing
+// GET /admin/puzzle/:contentId
 router.get("/puzzle/:contentId", async (req, res) => {
   const contentId = Number(req.params.contentId);
   if (!contentId) return res.status(400).json({ error: "Invalid content id" });
@@ -209,7 +272,7 @@ router.get("/attempts", async (req, res) => {
   try {
     const { rows } = await db.query(
       `SELECT pa.id,
-              u.name AS user,
+              u.name AS [user],
               pt.type_name AS puzzle_type,
               pa.score,
               pa.correct_words,
@@ -220,8 +283,8 @@ router.get("/attempts", async (req, res) => {
        JOIN puzzle_content pc ON pc.id = pa.puzzle_content_id
        JOIN puzzle_types pt ON pt.id = pc.puzzle_type_id
        ORDER BY pa.created_at DESC
-       LIMIT $1 OFFSET $2`,
-      [limit, offset]
+       OFFSET $1 ROWS FETCH NEXT $2 ROWS ONLY`,
+      [offset, limit]
     );
     return res.json(rows);
   } catch (err) {
@@ -247,38 +310,17 @@ router.post("/import-puzzle", async (req, res) => {
       if (language === "japanese" || language === "jp") language = "ja";
       if (language === "english") language = "en";
       const slot = Number(item.slot ?? 1) || 1;
-      const content = stripReservedFields(item.content ?? item);
+      const raw = stripReservedFields(item.content ?? item);
+      const contentStr = typeof raw === "string" ? raw : JSON.stringify(raw);
       const externalId = item.id || item.externalId || null;
 
       if (!date || !type) {
         return res.status(400).json({ error: "Each puzzle needs 'date' and 'type'" });
       }
 
-      const puzzleResult = await db.query(
-        `INSERT INTO puzzles (puzzle_date)
-         VALUES ($1)
-         ON CONFLICT (puzzle_date) DO UPDATE SET puzzle_date = EXCLUDED.puzzle_date
-         RETURNING id`,
-        [date]
-      );
-      const puzzleId = puzzleResult.rows[0].id;
-
-      const typeResult = await db.query(
-        `INSERT INTO puzzle_types (type_name)
-         VALUES ($1)
-         ON CONFLICT (type_name) DO UPDATE SET type_name = EXCLUDED.type_name
-         RETURNING id`,
-        [type]
-      );
-      const puzzleTypeId = typeResult.rows[0].id;
-
-      await db.query(
-        `INSERT INTO puzzle_content (puzzle_id, puzzle_type_id, language, slot, external_id, content)
-         VALUES ($1, $2, $3, $4, $5, $6)
-         ON CONFLICT (puzzle_id, puzzle_type_id, language, slot)
-         DO UPDATE SET content = EXCLUDED.content, external_id = EXCLUDED.external_id`,
-        [puzzleId, puzzleTypeId, language, slot, externalId, content]
-      );
+      const puzzleId = await upsertPuzzleDay(date);
+      const puzzleTypeId = await upsertPuzzleType(type);
+      await upsertPuzzleContent(puzzleId, puzzleTypeId, language, slot, externalId, contentStr);
 
       imported += 1;
     }

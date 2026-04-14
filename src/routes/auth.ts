@@ -20,11 +20,16 @@ const signinSchema = z.object({
   password: z.string().min(1, "Password is required"),
 });
 
-// Ensure password_hash exists (no-op if already there)
-const ensurePasswordColumn = db.query(
-  `ALTER TABLE users
-     ADD COLUMN IF NOT EXISTS password_hash text;`
-);
+// Ensure password_hash column exists (idempotent, runs once at startup)
+const ensurePasswordColumn = db.query(`
+  IF NOT EXISTS (
+    SELECT 1 FROM sys.columns
+    WHERE object_id = OBJECT_ID(N'users') AND name = N'password_hash'
+  )
+  BEGIN
+    ALTER TABLE users ADD password_hash NVARCHAR(MAX)
+  END
+`);
 
 async function hashPassword(password: string) {
   const salt = randomBytes(16);
@@ -57,15 +62,16 @@ router.post("/signup", async (req, res) => {
     const passwordHash = await hashPassword(password);
 
     const result = await db.query(
-      `INSERT INTO users (name,email,region,language,password_hash,created_at)
-       VALUES ($1,$2,$3,$4,$5,NOW())
-       RETURNING id, name, email, region, language`,
-      [name, email, region, language, passwordHash]
+      `INSERT INTO users (name, email, region, language, password_hash, created_at)
+       OUTPUT INSERTED.id, INSERTED.name, INSERTED.email, INSERTED.region, INSERTED.language
+       VALUES ($1, $2, $3, $4, $5, GETUTCDATE())`,
+      [name, email, region ?? null, language ?? null, passwordHash]
     );
 
     res.json(result.rows[0]);
   } catch (err: any) {
-    if (err?.code === "23505") {
+    // MSSQL unique-constraint violation numbers: 2627 (PRIMARY KEY) and 2601 (unique index)
+    if (err?.number === 2627 || err?.number === 2601) {
       return res.status(409).json({ error: "Email already registered" });
     }
     console.error("Error signing up user", err);
@@ -83,7 +89,7 @@ router.post("/signin", async (req, res) => {
   try {
     await ensurePasswordColumn;
     const existing = await db.query(
-      `SELECT id, name, email, region, language, password_hash FROM users WHERE email = $1 LIMIT 1`,
+      `SELECT TOP 1 id, name, email, region, language, password_hash FROM users WHERE email = $1`,
       [email]
     );
     if (!existing.rows.length) {
@@ -111,7 +117,7 @@ router.post("/set-password", async (req, res) => {
   try {
     await ensurePasswordColumn;
     const existing = await db.query(
-      `SELECT id, password_hash FROM users WHERE email = $1 LIMIT 1`,
+      `SELECT TOP 1 id, password_hash FROM users WHERE email = $1`,
       [email]
     );
     if (!existing.rows.length) {
@@ -167,11 +173,15 @@ router.patch("/profile/:id", async (req, res) => {
   values.push(userId);
 
   try {
+    // In MSSQL the OUTPUT clause must appear before WHERE
     const result = await db.query(
-      `UPDATE users SET ${updates.join(", ")} WHERE id = $${idx} RETURNING id, name, email, region, language`,
+      `UPDATE users
+         SET ${updates.join(", ")}
+       OUTPUT INSERTED.id, INSERTED.name, INSERTED.email, INSERTED.region, INSERTED.language
+       WHERE id = $${idx}`,
       values
     );
-    if (!result.rowCount) return res.status(404).json({ error: "User not found" });
+    if (!result.rows.length) return res.status(404).json({ error: "User not found" });
     return res.json(result.rows[0]);
   } catch (err) {
     console.error("Error updating profile", err);

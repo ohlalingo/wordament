@@ -9,16 +9,16 @@ const todayLocalISO = (): string => new Date().toISOString().slice(0, 10);
 router.get("/", async (_req, res) => {
   try {
     const { rows } = await db.query(
-      `SELECT u.name,
+      `SELECT TOP 20
+              u.name,
               u.region,
               SUM(pa.correct_words) AS score,
-              SUM(pa.time_taken) AS time,
+              SUM(pa.time_taken)    AS time,
               ROW_NUMBER() OVER (ORDER BY SUM(pa.correct_words) DESC, SUM(pa.time_taken) ASC) AS rank
        FROM puzzle_attempts pa
        JOIN users u ON u.id = pa.user_id
-       GROUP BY u.id
-       ORDER BY score DESC, time ASC
-       LIMIT 20`
+       GROUP BY u.id, u.name, u.region
+       ORDER BY score DESC, time ASC`
     );
     return res.json(rows);
   } catch (err) {
@@ -29,25 +29,24 @@ router.get("/", async (_req, res) => {
 
 router.get("/regional-champions", async (_req, res) => {
   try {
-    // Helper: get top per region for a date condition
-    const fetchBucket = async (whereClause: string, params: any[]) => {
+    const fetchBucket = async (extraWhere: string, params: any[]) => {
       const { rows } = await db.query(
         `WITH ranked AS (
            SELECT
-             u.region,
+             LOWER(LTRIM(RTRIM(u.region))) AS region,
              u.name,
              SUM(pa.correct_words) AS score,
-             SUM(pa.time_taken) AS time,
+             SUM(pa.time_taken)    AS time,
              ROW_NUMBER() OVER (
-               PARTITION BY u.region
+               PARTITION BY LOWER(LTRIM(RTRIM(u.region)))
                ORDER BY SUM(pa.correct_words) DESC, SUM(pa.time_taken) ASC
              ) AS rnk
            FROM puzzle_attempts pa
            JOIN users u ON u.id = pa.user_id
            JOIN puzzle_content pc ON pc.id = pa.puzzle_content_id
            JOIN puzzles p ON p.id = pc.puzzle_id
-           WHERE u.region IS NOT NULL AND u.region <> '' ${whereClause}
-           GROUP BY u.region, u.name
+           WHERE u.region IS NOT NULL AND LTRIM(RTRIM(u.region)) <> '' ${extraWhere}
+           GROUP BY LOWER(LTRIM(RTRIM(u.region))), u.name, u.id
          )
          SELECT region, name, score, time, rnk AS rank
          FROM ranked
@@ -57,18 +56,23 @@ router.get("/regional-champions", async (_req, res) => {
       return rows;
     };
 
-    // Today
     const today = todayLocalISO();
-    // Use both puzzle_date and attempt created_at to avoid stale seeded data skewing "today"
-    const todayRows = await fetchBucket(`AND p.puzzle_date = $1::date AND pa.created_at::date = $1::date`, [today]);
 
-    // This week (last 7 days including today)
-    const weekRows = await fetchBucket(
-      `AND p.puzzle_date >= ($1::date - INTERVAL '6 days') AND pa.created_at::date >= ($1::date - INTERVAL '6 days')`,
+    // Today – match both puzzle_date and attempt created_at to avoid stale data
+    const todayRows = await fetchBucket(
+      `AND p.puzzle_date = CAST($1 AS DATE)
+       AND CAST(pa.created_at AS DATE) = CAST($1 AS DATE)`,
       [today]
     );
 
-    // All time
+    // This week – last 7 days including today
+    const weekRows = await fetchBucket(
+      `AND p.puzzle_date >= DATEADD(day, -6, CAST($1 AS DATE))
+       AND CAST(pa.created_at AS DATE) >= DATEADD(day, -6, CAST($1 AS DATE))`,
+      [today]
+    );
+
+    // All time – no filter
     const allRows = await fetchBucket("", []);
 
     return res.json({
@@ -91,8 +95,8 @@ router.get("/user-stats/:userId", async (req, res) => {
     const [{ rows: summaryRows }, { rows: dateRows }] = await Promise.all([
       db.query(
         `SELECT
-           COUNT(*)::int AS puzzles_completed,
-           MIN(time_taken)::int AS best_time_seconds
+           CAST(COUNT(*) AS INT) AS puzzles_completed,
+           CAST(MIN(time_taken) AS INT) AS best_time_seconds
          FROM puzzle_attempts
          WHERE user_id = $1`,
         [userId]
@@ -116,14 +120,17 @@ router.get("/user-stats/:userId", async (req, res) => {
     let streak = 0;
     let cursor = today;
     for (const row of dateRows) {
-      const d = row.date.toISOString().slice(0, 10);
+      // MSSQL DATE columns come back as JS Date objects
+      const d =
+        row.date instanceof Date
+          ? row.date.toISOString().slice(0, 10)
+          : String(row.date).slice(0, 10);
       if (d === cursor) {
         streak += 1;
         const next = new Date(cursor);
         next.setDate(next.getDate() - 1);
         cursor = next.toISOString().slice(0, 10);
       } else if (d < cursor) {
-        // gap detected; stop streak
         break;
       }
     }

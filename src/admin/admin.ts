@@ -34,7 +34,7 @@ const customLoginTsxPath = path.join(__dirname, "components/custom-login.tsx")
 const customLoginJsPath = path.join(__dirname, "components/custom-login.js")
 const customLoginComponentPath = fs.existsSync(customLoginJsPath) ? customLoginJsPath : customLoginTsxPath
 componentLoader.override("Login", customLoginComponentPath)
-// __dirname at runtime is dist/admin; step back to repo root then frontend/public
+
 const cwFaviconPath = path.resolve(__dirname, "..", "..", "..", "frontend", "public", "cw-favicon.svg")
 const CW_LOGO_DATA_URL = "data:image/svg+xml;base64," + fs.readFileSync(cwFaviconPath).toString("base64")
 
@@ -77,58 +77,148 @@ export async function buildAdminRouter(dbUrlConfig: {
   const expressImport = await import("express")
   const expr = expressImport.default
   const dataSource = new DataSource({
-    type: "postgres",
+    type: "mssql",
     host: dbUrlConfig.host,
-    port: dbUrlConfig.port,
+    port: dbUrlConfig.port || 1433,
     username: dbUrlConfig.user,
     password: dbUrlConfig.password,
     database: dbUrlConfig.database,
     entities: AllEntities,
     synchronize: false,
     logging: true,
+    options: {
+      encrypt: process.env.DB_ENCRYPT !== "false",
+      trustServerCertificate: process.env.DB_TRUST_CERT !== "false",
+    },
   })
 
   if (!dataSource.isInitialized) {
     await dataSource.initialize()
   }
-  // ensure import_requests table exists for Import resource (synchronize is false)
-  await dataSource.query(`
-    CREATE TABLE IF NOT EXISTS import_requests (
-      id serial PRIMARY KEY,
-      date varchar NULL,
-      crossword_json text NULL,
-      wordsearch_json text NULL,
-      unjumble_json text NULL
-    );
-  `)
-  // add missing columns gracefully if table already existed without them
-  await dataSource.query(`ALTER TABLE import_requests ADD COLUMN IF NOT EXISTS date varchar NULL;`)
-  await dataSource.query(`ALTER TABLE import_requests ADD COLUMN IF NOT EXISTS crossword_json text NULL;`)
-  await dataSource.query(`ALTER TABLE import_requests ADD COLUMN IF NOT EXISTS wordsearch_json text NULL;`)
-  await dataSource.query(`ALTER TABLE import_requests ADD COLUMN IF NOT EXISTS unjumble_json text NULL;`)
 
-  // ensure puzzle_content has language column and uniqueness per day/type/lang
-  await dataSource.query(`ALTER TABLE puzzle_content ADD COLUMN IF NOT EXISTS language varchar DEFAULT 'en';`)
-  await dataSource.query(`UPDATE puzzle_content SET language = 'en' WHERE language IS NULL;`)
-  await dataSource.query(
-    `UPDATE puzzle_content SET language = 'ja' WHERE LOWER(language) IN ('ja', 'japanese', 'jp', '日本語');`
-  )
-  await dataSource.query(`UPDATE puzzle_content SET language = 'en' WHERE LOWER(language) IN ('en', 'english');`)
-  await dataSource.query(
-    `CREATE UNIQUE INDEX IF NOT EXISTS ux_puzzle_content_day_type_lang ON puzzle_content (puzzle_id, puzzle_type_id, language);`
-  )
-  await dataSource.query(`ALTER TABLE puzzle_content ADD COLUMN IF NOT EXISTS slot integer DEFAULT 1;`)
-  await dataSource.query(`UPDATE puzzle_content SET slot = 1 WHERE slot IS NULL;`)
-  await dataSource.query(
-    `CREATE UNIQUE INDEX IF NOT EXISTS ux_puzzle_content_day_type_lang_slot ON puzzle_content (puzzle_id, puzzle_type_id, language, slot);`
-  )
-  await dataSource.query(
-    `CREATE UNIQUE INDEX IF NOT EXISTS ux_puzzle_types_type_name ON puzzle_types (type_name);`
-  )
-  await dataSource.query(
-    `CREATE UNIQUE INDEX IF NOT EXISTS ux_puzzles_date ON puzzles (puzzle_date);`
-  )
-  await dataSource.query(`ALTER TABLE puzzle_content ADD COLUMN IF NOT EXISTS external_id varchar NULL;`)
+  // ── Schema bootstrap (idempotent) ────────────────────────────────────────
+  // Ensure import_requests table exists
+  await dataSource.query(`
+    IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'import_requests')
+    BEGIN
+      CREATE TABLE import_requests (
+        id              INT           IDENTITY(1,1) PRIMARY KEY,
+        date            NVARCHAR(MAX) NULL,
+        crossword_json  NVARCHAR(MAX) NULL,
+        wordsearch_json NVARCHAR(MAX) NULL,
+        unjumble_json   NVARCHAR(MAX) NULL
+      )
+    END
+  `)
+
+  // Add any missing columns to import_requests
+  for (const col of ["date", "crossword_json", "wordsearch_json", "unjumble_json"]) {
+    await dataSource.query(`
+      IF NOT EXISTS (
+        SELECT 1 FROM sys.columns
+        WHERE object_id = OBJECT_ID(N'import_requests') AND name = N'${col}'
+      )
+      BEGIN
+        ALTER TABLE import_requests ADD [${col}] NVARCHAR(MAX) NULL
+      END
+    `)
+  }
+
+  // Ensure puzzle_content.language column exists
+  await dataSource.query(`
+    IF NOT EXISTS (
+      SELECT 1 FROM sys.columns
+      WHERE object_id = OBJECT_ID(N'puzzle_content') AND name = N'language'
+    )
+    BEGIN
+      ALTER TABLE puzzle_content ADD language NVARCHAR(10) DEFAULT 'en'
+    END
+  `)
+  await dataSource.query(`UPDATE puzzle_content SET language = 'en' WHERE language IS NULL`)
+  await dataSource.query(`
+    UPDATE puzzle_content
+    SET language = 'ja'
+    WHERE LOWER(language) IN ('ja', 'japanese', 'jp')
+  `)
+  await dataSource.query(`
+    UPDATE puzzle_content
+    SET language = 'en'
+    WHERE LOWER(language) IN ('en', 'english')
+  `)
+
+  // Unique index: (puzzle_id, puzzle_type_id, language)
+  await dataSource.query(`
+    IF NOT EXISTS (
+      SELECT 1 FROM sys.indexes
+      WHERE name = N'ux_puzzle_content_day_type_lang'
+        AND object_id = OBJECT_ID(N'puzzle_content')
+    )
+    BEGIN
+      CREATE UNIQUE INDEX ux_puzzle_content_day_type_lang
+        ON puzzle_content (puzzle_id, puzzle_type_id, language)
+    END
+  `)
+
+  // Ensure puzzle_content.slot column exists
+  await dataSource.query(`
+    IF NOT EXISTS (
+      SELECT 1 FROM sys.columns
+      WHERE object_id = OBJECT_ID(N'puzzle_content') AND name = N'slot'
+    )
+    BEGIN
+      ALTER TABLE puzzle_content ADD slot INT DEFAULT 1
+    END
+  `)
+  await dataSource.query(`UPDATE puzzle_content SET slot = 1 WHERE slot IS NULL`)
+
+  // Unique index: (puzzle_id, puzzle_type_id, language, slot)
+  await dataSource.query(`
+    IF NOT EXISTS (
+      SELECT 1 FROM sys.indexes
+      WHERE name = N'ux_puzzle_content_day_type_lang_slot'
+        AND object_id = OBJECT_ID(N'puzzle_content')
+    )
+    BEGIN
+      CREATE UNIQUE INDEX ux_puzzle_content_day_type_lang_slot
+        ON puzzle_content (puzzle_id, puzzle_type_id, language, slot)
+    END
+  `)
+
+  // Unique index: puzzle_types (type_name)
+  await dataSource.query(`
+    IF NOT EXISTS (
+      SELECT 1 FROM sys.indexes
+      WHERE name = N'ux_puzzle_types_type_name'
+        AND object_id = OBJECT_ID(N'puzzle_types')
+    )
+    BEGIN
+      CREATE UNIQUE INDEX ux_puzzle_types_type_name ON puzzle_types (type_name)
+    END
+  `)
+
+  // Unique index: puzzles (puzzle_date)
+  await dataSource.query(`
+    IF NOT EXISTS (
+      SELECT 1 FROM sys.indexes
+      WHERE name = N'ux_puzzles_date'
+        AND object_id = OBJECT_ID(N'puzzles')
+    )
+    BEGIN
+      CREATE UNIQUE INDEX ux_puzzles_date ON puzzles (puzzle_date)
+    END
+  `)
+
+  // Ensure puzzle_content.external_id column exists
+  await dataSource.query(`
+    IF NOT EXISTS (
+      SELECT 1 FROM sys.columns
+      WHERE object_id = OBJECT_ID(N'puzzle_content') AND name = N'external_id'
+    )
+    BEGIN
+      ALTER TABLE puzzle_content ADD external_id NVARCHAR(MAX) NULL
+    END
+  `)
+
   BaseEntity.useDataSource(dataSource)
 
   const admin = new AdminJS({
@@ -138,7 +228,6 @@ export async function buildAdminRouter(dbUrlConfig: {
       admin: true,
       app: `cw-prod-${Date.now()}`,
     },
-    // non-standard prop to pass DS into action handler context
     dataSource,
     branding: {
       companyName: "CyberWordament",
@@ -268,7 +357,6 @@ export async function buildAdminRouter(dbUrlConfig: {
                 for (const record of response.records) {
                   const params = { ...record.params }
 
-                  // normalize snake/camel so listProperties resolve
                   if (params.externalId && !params.external_id) params.external_id = params.externalId
                   if (params.puzzleId && !params.puzzle_id) params.puzzle_id = params.puzzleId
                   if (params.puzzleTypeId && !params.puzzle_type_id) params.puzzle_type_id = params.puzzleTypeId
@@ -301,7 +389,6 @@ export async function buildAdminRouter(dbUrlConfig: {
                     params.externalId = params.external_id
                   }
 
-                  // ensure slot is present for list/edit hydration
                   if (params.slot === undefined && (record as any).params?.slot !== undefined) {
                     params.slot = (record as any).params.slot
                   }
@@ -315,7 +402,7 @@ export async function buildAdminRouter(dbUrlConfig: {
             new: { isVisible: false },
             edit: {
               isAccessible: true,
-              component: CREATE_PUZZLE_COMPONENT, // use the custom form for edit
+              component: CREATE_PUZZLE_COMPONENT,
               handler: async (request, response, context) => {
                 if (request.method?.toLowerCase() === "get") {
                   const rec = context.record
@@ -362,16 +449,10 @@ export async function buildAdminRouter(dbUrlConfig: {
                 const normalizedExternalId =
                   typeof externalId === "string" && externalId.trim() ? externalId.trim() : null
 
-                if (!cleanType) {
-                  throw new Error("Invalid puzzle type")
-                }
+                if (!cleanType) throw new Error("Invalid puzzle type")
 
                 if (typeof content === "string") {
-                  try {
-                    JSON.parse(content)
-                  } catch {
-                    throw new Error("Invalid JSON format")
-                  }
+                  try { JSON.parse(content) } catch { throw new Error("Invalid JSON format") }
                 }
 
                 const finalContent =
@@ -387,12 +468,11 @@ export async function buildAdminRouter(dbUrlConfig: {
 
                 // 2️⃣ Get puzzle type
                 const puzzleType = await dataSource.getRepository(PuzzleType).findOne({ where: { typeName: cleanType } })
-                if (!puzzleType) {
-                  throw new Error("Invalid puzzle type")
-                }
+                if (!puzzleType) throw new Error("Invalid puzzle type")
 
                 const normalizedSlot = Number(slot ?? 1) || 1
-                // 3️⃣ Remove existing (avoid duplicates)
+
+                // 3️⃣ Delete existing to avoid unique-constraint conflict (no ON CONFLICT at ORM level)
                 await dataSource.getRepository(PuzzleContent).delete({
                   puzzleId: puzzle.id,
                   puzzleTypeId: puzzleType.id,
@@ -440,8 +520,9 @@ export async function buildAdminRouter(dbUrlConfig: {
                   const userId = params.userId
                   const puzzleContentId = params.puzzleContentId
                   if (userId) {
+                    // TypeORM mssql raw query: positional params are bound as @0, @1 ...
                     const user = await Attempt.getRepository().manager.query(
-                      `SELECT name, email, region, language FROM users WHERE id = $1 LIMIT 1`,
+                      `SELECT TOP 1 name, email, region, language FROM users WHERE id = @0`,
                       [userId]
                     )
                     if (user?.[0]) {
@@ -452,15 +533,16 @@ export async function buildAdminRouter(dbUrlConfig: {
                   }
                   if (puzzleContentId) {
                     const pc = await Attempt.getRepository().manager.query(
-                      `SELECT p.puzzle_date, pc.language
+                      `SELECT TOP 1 p.puzzle_date, pc.language
                        FROM puzzle_content pc
                        JOIN puzzles p ON p.id = pc.puzzle_id
-                       WHERE pc.id = $1
-                       LIMIT 1`,
+                       WHERE pc.id = @0`,
                       [puzzleContentId]
                     )
                     if (pc?.[0]) {
-                      params.puzzleDate = pc[0].puzzle_date
+                      const d = pc[0].puzzle_date
+                      params.puzzleDate =
+                        d instanceof Date ? d.toISOString().slice(0, 10) : String(d).slice(0, 10)
                       params.language = params.language || pc[0].language
                     }
                   }
@@ -482,29 +564,36 @@ export async function buildAdminRouter(dbUrlConfig: {
       handler: async (_req, res) => {
         try {
           const mgr = dataSource.manager
+
+          // TOP 1 instead of LIMIT 1; push NULLs last via CASE WHEN
           const [lastAttempt] = await mgr.query(
-            `SELECT pa.created_at, u.name, u.region
+            `SELECT TOP 1 pa.created_at, u.name, u.region
              FROM puzzle_attempts pa
              JOIN users u ON u.id = pa.user_id
-             ORDER BY pa.created_at DESC NULLS LAST
-             LIMIT 1`
+             ORDER BY CASE WHEN pa.created_at IS NULL THEN 1 ELSE 0 END, pa.created_at DESC`
           )
+
+          // COUNT(CASE WHEN …) replaces Postgres FILTER(WHERE …)
+          // CAST(GETUTCDATE() AS DATE) replaces CURRENT_DATE
+          // DATEADD(day,-6,…) replaces INTERVAL '6 days'
           const [counts] = await mgr.query(
             `SELECT
-               COUNT(*) FILTER (WHERE p.puzzle_date = CURRENT_DATE) AS attempts_today,
-               COUNT(*) FILTER (WHERE p.puzzle_date >= CURRENT_DATE - INTERVAL '6 days') AS attempts_week,
+               COUNT(CASE WHEN p.puzzle_date = CAST(GETUTCDATE() AS DATE) THEN 1 END)                       AS attempts_today,
+               COUNT(CASE WHEN p.puzzle_date >= DATEADD(day,-6,CAST(GETUTCDATE() AS DATE)) THEN 1 END)      AS attempts_week,
                COUNT(*) AS attempts_all
              FROM puzzle_attempts pa
              JOIN puzzle_content pc ON pc.id = pa.puzzle_content_id
              JOIN puzzles p ON p.id = pc.puzzle_id`
           )
+
           const [users] = await mgr.query(
             `SELECT
                COUNT(*) AS total_users,
-               COUNT(DISTINCT user_id) AS active_users
+               COUNT(DISTINCT pa.user_id) AS active_users
              FROM users u
              LEFT JOIN puzzle_attempts pa ON pa.user_id = u.id`
           )
+
           res.json({
             lastAttempt: lastAttempt || null,
             counts: counts || { attempts_today: 0, attempts_week: 0, attempts_all: 0 },

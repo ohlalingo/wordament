@@ -7,7 +7,9 @@
     "dev": "tsx watch src/server.ts",
     "build": "tsc",
     "start": "node dist/server.js",
-    "import:puzzles": "tsx src/scripts/import-puzzle-content.ts"
+    "import:puzzles": "tsx src/scripts/import-puzzle-content.ts",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "keywords": [],
   "author": "",
@@ -21,10 +23,9 @@
     "dotenv": "^17.3.1",
     "express": "^5.2.1",
     "express-rate-limit": "^7.5.1",
-    "pg": "^8.20.0",
+    "mssql": "^11.0.1",
     "reflect-metadata": "^0.1.13",
     "rollup": "^4.59.0",
-    "@rollup/rollup-linux-x64-gnu": "4.59.0",
     "typeorm": "^0.3.20",
     "zod": "^3.25.76"
   },
@@ -34,9 +35,12 @@
   "devDependencies": {
     "@types/cors": "^2.8.19",
     "@types/express": "^5.0.6",
+    "@types/mssql": "^9.1.5",
     "@types/node": "^25.5.0",
-    "@types/pg": "^8.18.0",
+    "@types/supertest": "^6.0.2",
+    "supertest": "^7.0.0",
     "tsx": "^4.21.0",
-    "typescript": "^5.9.3"
+    "typescript": "^5.9.3",
+    "vitest": "^3.0.0"
   }
 }

@@ -20,12 +20,12 @@ router.post("/", async (req, res) => {
   }
   const { userId, puzzleContentId, correctWords, timeTaken } = parsed.data;
 
-  const score = correctWords ?? 0; // 1 point per correct word
+  const score = correctWords ?? 0;
 
   try {
     // Load puzzle info (to enforce per-content uniqueness and time limit)
     const puzzleRow = await db.query(
-      `SELECT pc.puzzle_id, pc.content
+      `SELECT TOP 1 pc.puzzle_id, pc.content
        FROM puzzle_content pc
        WHERE pc.id = $1`,
       [puzzleContentId]
@@ -37,10 +37,9 @@ router.post("/", async (req, res) => {
 
     // Enforce single attempt per (user, puzzle_content)
     const existing = await db.query(
-      `SELECT 1
+      `SELECT TOP 1 1 AS one
          FROM puzzle_attempts pa
-        WHERE pa.user_id = $1 AND pa.puzzle_content_id = $2
-        LIMIT 1`,
+        WHERE pa.user_id = $1 AND pa.puzzle_content_id = $2`,
       [userId, puzzleContentId]
     );
     if (existing.rows.length) {
@@ -61,10 +60,12 @@ router.post("/", async (req, res) => {
       return res.status(400).json({ error: "Time limit exceeded" });
     }
 
+    // INSERT with OUTPUT (MSSQL equivalent of RETURNING)
+    // completed = 1 (BIT) instead of true
     const result = await db.query(
       `INSERT INTO puzzle_attempts (user_id, puzzle_content_id, correct_words, score, time_taken, completed)
-       VALUES ($1,$2,$3,$4,$5,true)
-       RETURNING id`,
+       OUTPUT INSERTED.id
+       VALUES ($1, $2, $3, $4, $5, 1)`,
       [userId, puzzleContentId, correctWords, score, timeTaken]
     );
 

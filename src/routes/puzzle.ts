@@ -47,14 +47,80 @@ const normalizeDateString = (value: any): string | null => {
   }
 };
 
-// Use UTC date to avoid timezone drift (so "today" is consistent worldwide)
+// Use UTC date to avoid timezone drift
 function todayUTCISO(): string {
   return new Date().toISOString().slice(0, 10);
 }
 
+// ── Shared MERGE helpers ──────────────────────────────────────────────────────
+
+/**
+ * Upsert a puzzle day row and return its id.
+ * Equivalent to: INSERT … ON CONFLICT (puzzle_date) DO UPDATE … RETURNING id
+ */
+async function upsertPuzzleDay(puzzleDate: string): Promise<number> {
+  const { rows } = await db.query(
+    `MERGE puzzles WITH (HOLDLOCK) AS T
+     USING (VALUES ($1)) AS S(puzzle_date)
+     ON T.puzzle_date = S.puzzle_date
+     WHEN NOT MATCHED THEN INSERT (puzzle_date) VALUES (S.puzzle_date)
+     WHEN MATCHED    THEN UPDATE SET puzzle_date = S.puzzle_date
+     OUTPUT INSERTED.id;`,
+    [puzzleDate]
+  );
+  return rows[0].id as number;
+}
+
+/**
+ * Upsert a puzzle_type row and return its id.
+ */
+async function upsertPuzzleType(typeName: string): Promise<number> {
+  const { rows } = await db.query(
+    `MERGE puzzle_types WITH (HOLDLOCK) AS T
+     USING (VALUES ($1)) AS S(type_name)
+     ON T.type_name = S.type_name
+     WHEN NOT MATCHED THEN INSERT (type_name) VALUES (S.type_name)
+     WHEN MATCHED    THEN UPDATE SET type_name = S.type_name
+     OUTPUT INSERTED.id;`,
+    [typeName]
+  );
+  return rows[0].id as number;
+}
+
+/**
+ * Upsert puzzle_content (no id needed back).
+ * Content must be a JSON string.
+ */
+async function upsertPuzzleContent(
+  puzzleId: number,
+  puzzleTypeId: number,
+  language: string,
+  slot: number,
+  externalId: string | null,
+  content: string
+): Promise<void> {
+  await db.query(
+    `MERGE puzzle_content WITH (HOLDLOCK) AS T
+     USING (VALUES ($1,$2,$3,$4,$5,$6))
+       AS S(puzzle_id, puzzle_type_id, language, slot, external_id, content)
+     ON  T.puzzle_id      = S.puzzle_id
+     AND T.puzzle_type_id = S.puzzle_type_id
+     AND T.language       = S.language
+     AND T.slot           = S.slot
+     WHEN NOT MATCHED THEN
+       INSERT (puzzle_id, puzzle_type_id, language, slot, external_id, content)
+       VALUES (S.puzzle_id, S.puzzle_type_id, S.language, S.slot, S.external_id, S.content)
+     WHEN MATCHED THEN
+       UPDATE SET content = S.content, external_id = S.external_id;`,
+    [puzzleId, puzzleTypeId, language, slot, externalId, content]
+  );
+}
+
+// ── Routes ────────────────────────────────────────────────────────────────────
+
 // GET /puzzle/today - returns today's puzzles grouped by type
 router.get("/today", async (req, res) => {
-  const today = todayUTCISO(); // YYYY-MM-DD in UTC
+  const today = todayUTCISO();
   const lang = normalizeLang(req.query.lang as string);
 
   try {
@@ -124,52 +190,21 @@ router.post("/upload", adminAuth, async (req, res) => {
   const slot = parsed.data.slot ?? 1;
   let language = normalizeLang(parsed.data.language);
   const cleanContent = stripReservedFields(content);
+  const contentStr = typeof cleanContent === "string" ? cleanContent : JSON.stringify(cleanContent);
 
   try {
-    // ensure puzzle day exists (use normalized YYYY-MM-DD)
-    const puzzleDay = await db.query(
-      `INSERT INTO puzzles (puzzle_date) VALUES ($1)
-       ON CONFLICT (puzzle_date) DO UPDATE SET puzzle_date = EXCLUDED.puzzle_date
-       RETURNING id`,
-      [puzzleDate]
-    );
-    const puzzleId = puzzleDay.rows[0].id as number;
+    const puzzleId = await upsertPuzzleDay(puzzleDate);
+    const puzzleTypeId = await upsertPuzzleType(type);
+    await upsertPuzzleContent(puzzleId, puzzleTypeId, language, slot, id || null, contentStr);
 
-    // ensure puzzle type exists (reuse existing if present)
-    const typeRow = await db.query(
-      `INSERT INTO puzzle_types (type_name) VALUES ($1)
-       ON CONFLICT (type_name) DO UPDATE SET type_name = EXCLUDED.type_name
-       RETURNING id`,
-      [type]
-    );
-    const puzzleTypeId = typeRow.rows[0].id as number;
-
-    const inserted = await db.query(
-      `INSERT INTO puzzle_content (puzzle_id, puzzle_type_id, language, slot, external_id, content)
-       VALUES ($1,$2,$3,$4,$5,$6)
-       ON CONFLICT (puzzle_id, puzzle_type_id, language, slot)
-       DO UPDATE SET content = EXCLUDED.content, external_id = EXCLUDED.external_id
-       RETURNING id`,
-      [puzzleId, puzzleTypeId, language, slot, id || null, cleanContent]
-    );
-
-    return res.status(201).json({
-      puzzleContentId: inserted.rows[0].id,
-      puzzleId,
-      puzzleTypeId,
-    });
+    return res.status(201).json({ puzzleId, puzzleTypeId });
   } catch (err) {
     console.error("Error uploading puzzle", err);
     return res.status(500).json({ error: "Failed to upload puzzle" });
   }
 });
 
-// Legacy/demo endpoint to return seeded JSON files if DB is empty.
-// Strategy:
-// 1) Find the latest puzzle_date <= today that has any content (any language).
-// 2) For that date, fetch requested language rows; if none, fetch any language.
-// 3) If some types are still missing, fill them from any language on that date.
-// 4) If nothing is found, fall back to bundled JSON.
+// GET /puzzle/demo - legacy/demo endpoint (falls back to bundled JSON if DB is empty)
 router.get("/demo", async (req, res) => {
   try {
     const today = todayUTCISO();
@@ -200,23 +235,24 @@ router.get("/demo", async (req, res) => {
 
     // Find latest date with any content <= today
     const latestAny = await db.query(
-      `SELECT p.puzzle_date
+      `SELECT TOP 1 p.puzzle_date
        FROM puzzles p
        JOIN puzzle_content pc ON pc.puzzle_id = p.id
        WHERE p.puzzle_date <= $1
-       ORDER BY p.puzzle_date DESC
-       LIMIT 1`,
+       ORDER BY p.puzzle_date DESC`,
       [today]
     );
-    const targetDate: string | null = latestAny.rows?.[0]?.puzzle_date || null;
+    const targetDate: string | null = latestAny.rows?.[0]?.puzzle_date
+      ? (latestAny.rows[0].puzzle_date instanceof Date
+          ? latestAny.rows[0].puzzle_date.toISOString().slice(0, 10)
+          : String(latestAny.rows[0].puzzle_date).slice(0, 10))
+      : null;
 
-    // Step 2: fetch requested lang; if none, fetch any lang
+    // Fetch requested language rows; if none, any language
     let rows = await fetchDay(targetDate, lang);
-    if (!rows.length) {
-      rows = await fetchDay(targetDate);
-    }
+    if (!rows.length) rows = await fetchDay(targetDate);
 
-    // Step 3: fill missing types from same date in any language
+    // Fill missing types from any language on the same date
     if (rows.length) {
       const haveTypes = new Set(rows.map((r: any) => r.type_name));
       const missingTypes = ["crossword", "wordsearch", "unjumble"].filter((t) => !haveTypes.has(t));
@@ -239,7 +275,6 @@ router.get("/demo", async (req, res) => {
           console.error("JSON parse failed:", row.content);
           parsed = {};
         }
-
         grouped[row.type_name] = {
           puzzleContentId: row.puzzle_content_id,
           puzzleId: row.puzzle_id,
@@ -248,7 +283,6 @@ router.get("/demo", async (req, res) => {
         };
       }
 
-      // If crossword missing, fall back to bundled demo crossword
       if (!grouped.crossword) {
         try {
           const base = path.resolve("puzzles");
@@ -266,19 +300,12 @@ router.get("/demo", async (req, res) => {
     console.warn("Falling back to local JSON for demo", err);
   }
 
-  // Fallback to JSON files if DB not populated
+  // Fallback to bundled JSON files
   try {
     const base = path.resolve("puzzles");
-    const crossword = JSON.parse(
-      fs.readFileSync(path.join(base, "crossword/demo.json"), "utf-8")
-    );
-    const wordsearch = JSON.parse(
-      fs.readFileSync(path.join(base, "wordsearch/demo.json"), "utf-8")
-    );
-    const unjumble = JSON.parse(
-      fs.readFileSync(path.join(base, "unjumble/demo.json"), "utf-8")
-    );
-
+    const crossword = JSON.parse(fs.readFileSync(path.join(base, "crossword/demo.json"), "utf-8"));
+    const wordsearch = JSON.parse(fs.readFileSync(path.join(base, "wordsearch/demo.json"), "utf-8"));
+    const unjumble = JSON.parse(fs.readFileSync(path.join(base, "unjumble/demo.json"), "utf-8"));
     return res.json({ crossword, wordsearch, unjumble });
   } catch (err) {
     console.error("Error loading demo puzzles", err);
@@ -316,8 +343,12 @@ router.get("/:date", async (req, res) => {
         console.error("JSON parse failed:", row.content);
         parsed = {};
       }
-
-      grouped[row.type_name] = { puzzleContentId: row.puzzle_content_id, puzzleId: row.puzzle_id, language: row.language, ...parsed };
+      grouped[row.type_name] = {
+        puzzleContentId: row.puzzle_content_id,
+        puzzleId: row.puzzle_id,
+        language: row.language,
+        ...parsed,
+      };
     }
     return res.json({
       crossword: grouped.crossword ?? null,
@@ -330,7 +361,7 @@ router.get("/:date", async (req, res) => {
   }
 });
 
-// Export puzzles for a given date (or all)
+// GET /puzzle/export - export puzzles for a given date (or all)
 router.get("/export", async (req, res) => {
   const { date, lang } = req.query as { date?: string; lang?: string };
   try {
@@ -358,11 +389,14 @@ router.get("/export", async (req, res) => {
     );
     if (!rows.length) return res.status(404).json({ error: "No puzzles found" });
 
-    // group by date
     const grouped: Record<string, Record<string, any>> = {};
     for (const row of rows) {
-      if (!grouped[row.puzzle_date]) grouped[row.puzzle_date] = {};
-      const typeBucket = grouped[row.puzzle_date][row.type_name] || {};
+      const dateKey =
+        row.puzzle_date instanceof Date
+          ? row.puzzle_date.toISOString().slice(0, 10)
+          : String(row.puzzle_date).slice(0, 10);
+      if (!grouped[dateKey]) grouped[dateKey] = {};
+      const typeBucket = grouped[dateKey][row.type_name] || {};
       let parsed = row.content;
       try {
         if (typeof parsed === "string") parsed = JSON.parse(parsed);
@@ -371,9 +405,8 @@ router.get("/export", async (req, res) => {
         console.error("JSON parse failed:", row.content);
         parsed = {};
       }
-
       typeBucket[row.language] = parsed;
-      grouped[row.puzzle_date][row.type_name] = typeBucket;
+      grouped[dateKey][row.type_name] = typeBucket;
     }
     return res.json(grouped);
   } catch (err) {

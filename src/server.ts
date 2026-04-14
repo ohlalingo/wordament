@@ -62,7 +62,6 @@ app.use("/api", leaderboardRoutes);
 app.use("/puzzle", puzzleRoutes);
 app.use("/auth", authLimiter, authRoutes);
 app.use("/attempt", attemptLimiter, attemptRoutes);
-// Legacy prefix kept for old clients
 app.use("/leaderboard", leaderboardRoutes);
 
 // Remove reserved metadata keys from stored JSON content
@@ -77,7 +76,7 @@ function stripReservedFields(content: any) {
   return content;
 }
 
-// Normalize incoming date values to YYYY-MM-DD (server-local) to avoid TZ shifts
+// Normalize incoming date values to YYYY-MM-DD
 function normalizeDateString(value: any): string | null {
   if (!value) return null;
   if (typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value)) return value;
@@ -88,6 +87,59 @@ function normalizeDateString(value: any): string | null {
   } catch {
     return null;
   }
+}
+
+// ── Shared MERGE helpers (also used in routes/puzzle.ts and routes/admin.ts) ─
+
+async function upsertPuzzleDay(puzzleDate: string): Promise<number> {
+  const { rows } = await db.query(
+    `MERGE puzzles WITH (HOLDLOCK) AS T
+     USING (VALUES ($1)) AS S(puzzle_date)
+     ON T.puzzle_date = S.puzzle_date
+     WHEN NOT MATCHED THEN INSERT (puzzle_date) VALUES (S.puzzle_date)
+     WHEN MATCHED    THEN UPDATE SET puzzle_date = S.puzzle_date
+     OUTPUT INSERTED.id;`,
+    [puzzleDate]
+  );
+  return rows[0].id as number;
+}
+
+async function upsertPuzzleType(typeName: string): Promise<number> {
+  const { rows } = await db.query(
+    `MERGE puzzle_types WITH (HOLDLOCK) AS T
+     USING (VALUES ($1)) AS S(type_name)
+     ON T.type_name = S.type_name
+     WHEN NOT MATCHED THEN INSERT (type_name) VALUES (S.type_name)
+     WHEN MATCHED    THEN UPDATE SET type_name = S.type_name
+     OUTPUT INSERTED.id;`,
+    [typeName]
+  );
+  return rows[0].id as number;
+}
+
+async function upsertPuzzleContent(
+  puzzleId: number,
+  puzzleTypeId: number,
+  language: string,
+  slot: number,
+  externalId: string | null,
+  content: string
+): Promise<void> {
+  await db.query(
+    `MERGE puzzle_content WITH (HOLDLOCK) AS T
+     USING (VALUES ($1,$2,$3,$4,$5,$6))
+       AS S(puzzle_id, puzzle_type_id, language, slot, external_id, content)
+     ON  T.puzzle_id      = S.puzzle_id
+     AND T.puzzle_type_id = S.puzzle_type_id
+     AND T.language       = S.language
+     AND T.slot           = S.slot
+     WHEN NOT MATCHED THEN
+       INSERT (puzzle_id, puzzle_type_id, language, slot, external_id, content)
+       VALUES (S.puzzle_id, S.puzzle_type_id, S.language, S.slot, S.external_id, S.content)
+     WHEN MATCHED THEN
+       UPDATE SET content = S.content, external_id = S.external_id;`,
+    [puzzleId, puzzleTypeId, language, slot, externalId, content]
+  );
 }
 
 // Admin import endpoint (used by AdminJS Import page)
@@ -105,37 +157,16 @@ app.post("/api/import-puzzle", adminAuth, async (req, res) => {
       let language = (item.language || "en").toLowerCase();
       if (language === "japanese" || language === "jp") language = "ja";
       if (language === "english") language = "en";
-      const content = stripReservedFields(item.content ?? item);
+      const raw = stripReservedFields(item.content ?? item);
+      const contentStr = typeof raw === "string" ? raw : JSON.stringify(raw);
 
       if (!date || !type) {
         return res.status(400).json({ error: "Each puzzle needs 'date' and 'type'" });
       }
 
-      const puzzleResult = await db.query(
-        `INSERT INTO puzzles (puzzle_date)
-         VALUES ($1)
-         ON CONFLICT (puzzle_date) DO UPDATE SET puzzle_date = EXCLUDED.puzzle_date
-         RETURNING id`,
-        [date]
-      );
-      const puzzleId = puzzleResult.rows[0].id;
-
-      const typeResult = await db.query(
-        `INSERT INTO puzzle_types (type_name)
-         VALUES ($1)
-         ON CONFLICT (type_name) DO UPDATE SET type_name = EXCLUDED.type_name
-         RETURNING id`,
-        [type]
-      );
-      const puzzleTypeId = typeResult.rows[0].id;
-
-      await db.query(
-        `INSERT INTO puzzle_content (puzzle_id, puzzle_type_id, language, slot, external_id, content)
-         VALUES ($1, $2, $3, $4, $5, $6)
-         ON CONFLICT (puzzle_id, puzzle_type_id, language, slot)
-         DO UPDATE SET content = EXCLUDED.content, external_id = EXCLUDED.external_id`,
-        [puzzleId, puzzleTypeId, language, slot, externalId, content]
-      );
+      const puzzleId = await upsertPuzzleDay(date);
+      const puzzleTypeId = await upsertPuzzleType(type);
+      await upsertPuzzleContent(puzzleId, puzzleTypeId, language, slot, externalId, contentStr);
 
       imported += 1;
     }
@@ -152,8 +183,8 @@ async function initAdmin() {
   try {
     const { admin, router } = await buildAdminRouter({
       host: process.env.DB_HOST || "localhost",
-      port: Number(process.env.DB_PORT) || 5432,
-      user: process.env.DB_USER || "postgres",
+      port: Number(process.env.DB_PORT) || 1433,   // MSSQL default port
+      user: process.env.DB_USER || "sa",
       password: process.env.DB_PASS || "",
       database: process.env.DB_NAME || "cyberwordament",
     });
@@ -170,7 +201,7 @@ async function initAdmin() {
 async function start() {
   await initAdmin();
 
-  const PORT = 4000;
+  const PORT = Number(process.env.PORT) || 4000;
   app.listen(PORT, () => {
     console.log(`Server running on http://localhost:${PORT}`);
   });
