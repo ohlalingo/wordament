@@ -211,11 +211,16 @@ const CreatePuzzleForm: React.FC<Props> = ({ record, action }) => {
         <Box display="flex" flexDirection="column" gap="4px">
           <Label>Puzzle Date</Label>
           <DatePicker
-            value={dateIso ? new Date(dateIso + "T00:00:00") : undefined}
+            value={dateIso ? new Date(dateIso + "T12:00:00Z") : undefined}
             onChange={(val) => {
               const v: any = val
-              if (v instanceof Date) setDateIso(v.toISOString().slice(0, 10))
-              else if (typeof v === "string") setDateIso(v.split("T")[0])
+              if (v instanceof Date) {
+                // Use local date parts to avoid UTC-shift off-by-one
+                const y = v.getFullYear()
+                const m = String(v.getMonth() + 1).padStart(2, "0")
+                const d = String(v.getDate()).padStart(2, "0")
+                setDateIso(`${y}-${m}-${d}`)
+              } else if (typeof v === "string") setDateIso(v.split("T")[0])
               else setDateIso(null)
             }}
             propertyType="date"
