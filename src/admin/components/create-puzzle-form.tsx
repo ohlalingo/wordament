@@ -210,54 +210,19 @@ const CreatePuzzleForm: React.FC<Props> = ({ record, action }) => {
         </Box>
         <Box display="flex" flexDirection="column" gap="4px">
           <Label>Puzzle Date</Label>
-          <DatePicker
-            value={dateIso ? new Date(dateIso + "T12:00:00Z") : undefined}
-            onChange={(val) => {
-              const v: any = val
-              if (v instanceof Date) {
-                // Use local date parts to avoid UTC-shift off-by-one
-                const y = v.getFullYear()
-                const m = String(v.getMonth() + 1).padStart(2, "0")
-                const d = String(v.getDate()).padStart(2, "0")
-                setDateIso(`${y}-${m}-${d}`)
-              } else if (typeof v === "string") setDateIso(v.split("T")[0])
-              else setDateIso(null)
+          <input
+            type="date"
+            value={dateIso ?? ""}
+            onChange={(e) => setDateIso(e.target.value || null)}
+            style={{
+              height: "40px",
+              padding: "0 12px",
+              border: "1px solid #C0C0CA",
+              borderRadius: "4px",
+              fontSize: "14px",
+              width: "100%",
+              boxSizing: "border-box",
             }}
-            propertyType="date"
-            placeholderText="YYYY-MM-DD"
-            dateFormat="yyyy-MM-dd"
-            shouldCloseOnSelect
-            popperPlacement="bottom-start"
-            renderCustomHeader={({
-              date,
-              changeYear,
-              changeMonth,
-              decreaseMonth,
-              increaseMonth,
-            }) => (
-              <Box display="flex" alignItems="center" justifyContent="space-between" px="md" py="sm">
-                <button type="button" onClick={decreaseMonth} style={{ background: "none", border: "none" }}>
-                  ‹
-                </button>
-                <Box display="flex" gap="8px">
-                  <Select
-                    value={{ value: months[date.getMonth()], label: months[date.getMonth()] }}
-                    onChange={(opt) => changeMonth(months.findIndex((m) => m === (opt as any)?.value))}
-                    options={months.map((m) => ({ value: m, label: m }))}
-                    variant="filter"
-                  />
-                  <Select
-                    value={{ value: date.getFullYear(), label: String(date.getFullYear()) }}
-                    onChange={(opt) => changeYear(Number((opt as any)?.value))}
-                    options={years.map((y) => ({ value: y, label: String(y) }))}
-                    variant="filter"
-                  />
-                </Box>
-                <button type="button" onClick={increaseMonth} style={{ background: "none", border: "none" }}>
-                  ›
-                </button>
-              </Box>
-            )}
           />
         </Box>
         <Box display="flex" flexDirection="column" gap="4px">
